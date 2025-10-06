@@ -1,15 +1,60 @@
-# Justfile for pyzma_idf_lightcurve
+# Justfile for pyzma_idf_lightcurve - IDF Lightcurve Processing Package
 
 # Show available commands
 list:
     @just --list
 
+# IDF-specific development tasks
+install:
+    @echo "Installing package with uv..."
+    uv pip install -e .
+
+pipeline-dev:
+    @echo "Starting Dagster development server..."
+    idf-pipeline-dev
+
+pipeline-check:
+    @echo "Checking pipeline imports..."
+    PYTHONPATH=src python -c "from pyzma_idf_lightcurve.pipeline import defs; print('✅ Pipeline imports successfully')"
+
+viz port="8050":
+    @echo "Starting lightcurve visualization on port {{port}}..."
+    idf-lightcurve-viz --port {{port}}
+
+viz-binary db_path="lightcurves.db" port="8050":
+    @echo "Starting binary lightcurve visualization..."
+    idf-lightcurve-viz --db-path {{db_path}} --port {{port}} --binary
+
+config-test:
+    @echo "Testing configuration schemas..."
+    PYTHONPATH=src python -c "from pyzma_idf_lightcurve.pipeline.config import IDFPipelineConfig; import json; config = IDFPipelineConfig(); print('✅ Dagster native config with pydantic Field support:', json.dumps(config.model_dump(), indent=2)); print('✅ Config validation and metadata working')"
+
+benchmark-binary:
+    @echo "Running binary storage benchmarks..."
+    PYTHONPATH=src python -c "from pyzma_idf_lightcurve.lightcurve.binary import calculate_storage_requirements, benchmark_binary_vs_traditional; calculate_storage_requirements(); print(); benchmark_binary_vs_traditional()"
+
+template-test:
+    @echo "Testing template parsing..."
+    PYTHONPATH=src python -c "from pyzma_idf_lightcurve.pipeline.templates import IDFFilename, PartitionKey; test_files = ['IDF_gr123_ch1_sci.fits', 'IDF_gr456_ch2_unc.fits', 'IDF_gr789_ch1_sci_clean.fits']; [print(f'✅ {f} -> {IDFFilename.parse(f)}' if IDFFilename.make(**IDFFilename.parse(f)) == f else f'❌ {f} failed') for f in test_files]"
+
+spell-check:
+    @echo "Running spell check..."
+    uv run --extra dev codespell .
+
+spell-fix:
+    @echo "Fixing spelling errors..."
+    uv run --extra dev codespell . --write-changes
+
+idf-test: config-test pipeline-check benchmark-binary template-test
+    @echo "✅ IDF-specific tests complete!"
+
 # Run all the formatting, linting, and testing commands
 qa:
-    uv run --python=3.13 --extra test ruff format .
-    uv run --python=3.13 --extra test ruff check . --fix
-    uv run --python=3.13 --extra test ruff check --select I --fix .
-    uv run --python=3.13 --extra test ty check .
+    uv run --python=3.13 --extra dev ruff format .
+    uv run --python=3.13 --extra dev ruff check . --fix
+    uv run --python=3.13 --extra dev ruff check --select I --fix .
+    uv run --python=3.13 --extra dev ty check .
+    uv run --python=3.13 --extra dev codespell .
     uv run --python=3.13 --extra test pytest .
 
 # Run all the tests for all the supported Python versions

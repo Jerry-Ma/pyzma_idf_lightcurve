@@ -3,12 +3,8 @@ name = "pyzma_idf_lightcurve"
 dynamic = ["version"]
 description = "Package to build and examine IDF lightcurves."
 readme = "README.md"
-authors = [
-  { name = "Zhiyuan Ma", email = "zhiyuanma@umass.edu" },
-]
-maintainers = [
-  { name = "Zhiyuan Ma", email = "zhiyuanma@umass.edu" },
-]
+authors = [{ name = "Zhiyuan Ma", email = "zhiyuanma@umass.edu" }]
+maintainers = [{ name = "Zhiyuan Ma", email = "zhiyuanma@umass.edu" }]
 license = "BSD-3-Clause"
 license-files = ["LICENSE"]
 requires-python = ">= 3.11"
@@ -22,7 +18,35 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: Implementation :: CPython",
 ]
-dependencies = ["typer"]
+dependencies = [
+  "typer",
+  "pydantic>=2.0.0",
+  # Core data processing
+  "numpy>=1.21.0",
+  "pandas>=1.5.0",
+  "polars>=0.20.0",
+  "astropy>=5.0.0",
+  "loguru>=0.6.0",
+
+  # Dagster pipeline
+  "dagster>=1.5.0",
+  "dagster-duckdb>=0.21.0",
+
+  # Database
+  "duckdb>=0.9.0",
+
+  # Visualization
+  "plotly>=5.0.0",
+  "dash>=2.10.0",
+  "matplotlib>=3.5.0",
+
+  # Image processing (for future use)
+  "scipy>=1.9.0",
+  "scikit-image>=0.19.0",
+
+  # Configuration
+  "pyyaml>=6.0.0",
+]
 
 [project.optional-dependencies]
 test = ["pytest", "coverage"]
@@ -32,6 +56,7 @@ dev = [
   "pre-commit",
   "ruff",
   "ty",
+  "codespell",
   "pandas-stubs",
   "narwhals",
   "ipdb",
@@ -51,6 +76,8 @@ homepage = "https://github.com/Jerry-Ma/pyzma_idf_lightcurve"
 
 [project.scripts]
 pyzma_idf_lightcurve = "pyzma_idf_lightcurve.cli:app"
+idf-pipeline-dev = "pyzma_idf_lightcurve.pipeline.dev_server:main"
+idf-lightcurve-viz = "pyzma_idf_lightcurve.lightcurve.dash.app:main"
 
 [build-system]
 requires = ["setuptools>=80", "setuptools_scm>=8"]
@@ -76,7 +103,6 @@ version_file = "src/pyzma_idf_lightcurve/_version.py"
 minversion = "8.0"
 testpaths = ["tests", "docs"]
 norecursedirs = [".*", "docs[\\/]_build", "docs[\\/]generated"]
-remote_data_strict = true
 addopts = [
   "-ra",
   "--color=yes",
@@ -85,7 +111,7 @@ addopts = [
   "--strict-markers",
   "-p no:legacypath",
 ]
-log_cli_level = "info"
+log_cli_level = "INFO"
 xfail_strict = true
 filterwarnings = ["error"]
 
@@ -141,5 +167,8 @@ cache-keys = [
   { git = { commit = true, tags = true } },
 ]
 
-[tool.cruft]
-skip = [".git"]
+[tool.codespell]
+skip = ".venv,*.git,*.pdf,*.svg,*.pyc,*.egg-info,*/__pycache__/*,*/build/*,*/dist/*,.ruff_cache,.pytest_cache"
+ignore-words-list = "idf,aor,aors,lac,wht,nd,te,hist,ot,ba,dne,ue,mopex,sexcfg,ecsv,pyzma,astropy,dagster,pydantic,zhiyuan,zhiyuanma"
+check-filenames = true
+check-hidden = false
