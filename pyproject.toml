@@ -167,6 +167,9 @@ cache-keys = [
   { git = { commit = true, tags = true } },
 ]
 
+[tool.cruft]
+skip = [".git/"]
+
 [tool.codespell]
 skip = ".venv,*.git,*.pdf,*.svg,*.pyc,*.egg-info,*/__pycache__/*,*/build/*,*/dist/*,.ruff_cache,.pytest_cache"
 ignore-words-list = "idf,aor,aors,lac,wht,nd,te,hist,ot,ba,dne,ue,mopex,sexcfg,ecsv,pyzma,astropy,dagster,pydantic,zhiyuan,zhiyuanma"
