@@ -20,6 +20,7 @@ classifiers = [
 ]
 dependencies = [
   "typer",
+  "rich",
   "pydantic>=2.0.0",
   # Core data processing
   "numpy>=1.21.0",
@@ -27,10 +28,13 @@ dependencies = [
   "polars>=0.20.0",
   "astropy>=5.0.0",
   "loguru>=0.6.0",
+  "xarray>=2023.1.0",
+  "zarr>=3.0.0",
 
   # Dagster pipeline
   "dagster>=1.5.0",
   "dagster-duckdb>=0.21.0",
+  "dagster-webserver>=0.21.0",
 
   # Database
   "duckdb>=0.9.0",
@@ -75,9 +79,7 @@ changelog = "https://github.com/Jerry-Ma/pyzma_idf_lightcurve/blob/master/change
 homepage = "https://github.com/Jerry-Ma/pyzma_idf_lightcurve"
 
 [project.scripts]
-pyzma_idf_lightcurve = "pyzma_idf_lightcurve.cli:app"
-idf-pipeline-dev = "pyzma_idf_lightcurve.pipeline.dev_server:main"
-idf-lightcurve-viz = "pyzma_idf_lightcurve.lightcurve.dash.app:main"
+idflc = "pyzma_idf_lightcurve.cli:app"
 
 [build-system]
 requires = ["setuptools>=80", "setuptools_scm>=8"]
@@ -113,7 +115,11 @@ addopts = [
 ]
 log_cli_level = "INFO"
 xfail_strict = true
-filterwarnings = ["error"]
+filterwarnings = [
+  "error",
+  "ignore::zarr.errors.UnstableSpecificationWarning",
+  "ignore::UserWarning:zarr",
+]
 
 [tool.ty]
 # All rules are enabled as "error" by default; no need to specify unless overriding.

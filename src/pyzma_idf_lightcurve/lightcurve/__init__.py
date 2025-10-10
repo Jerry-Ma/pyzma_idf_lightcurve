@@ -2,13 +2,12 @@
 Core lightcurve functionality for IDF data analysis.
 
 This package contains:
-- binary: Binary blob storage optimization for lightcurves
-- data: Data structures and database schemas
-- dash: Visualization and interactive analysis tools
+- datamodel: Main data structures for xarray-based lightcurve storage
+- catalog: Source catalog management and operations
+- dash: Visualization and interactive analysis tools (optional)
 """
 
-from .binary import BinaryLightcurveFormat, BinaryLightcurveDatabase
-from .data import LightcurveDatabase, LightcurveQueryEngine
+from .datamodel import LightcurveStorage, SourceCatalog
 
 # Optional dash imports (only if dependencies are available)
 try:
@@ -19,10 +18,8 @@ except ImportError:
     LightcurveVisualizationApp = None
 
 __all__ = [
-    "BinaryLightcurveFormat",
-    "BinaryLightcurveDatabase", 
-    "LightcurveDatabase",
-    "LightcurveQueryEngine",
+    "LightcurveStorage", 
+    "SourceCatalog",
 ]
 
 if _DASH_AVAILABLE:

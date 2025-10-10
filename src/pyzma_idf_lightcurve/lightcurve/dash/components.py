@@ -14,7 +14,7 @@ def create_lightcurve_plot(
     magnitudes: np.ndarray,
     mag_errors: np.ndarray,
     title: str = "Lightcurve",
-    flags: Optional[np.ndarray] = None
+    flags: | None]np.ndarray] = None
 ) -> go.Figure:
     """
     Create a standard lightcurve plot.
@@ -63,7 +63,7 @@ def create_lightcurve_plot(
 
 
 def create_multi_panel_plot(
-    lightcurves: Dict[str, Dict[str, np.ndarray]],
+    lightcurves: dict[str, dict[str, np.ndarray]],
     title: str = "Multi-Panel Lightcurve"
 ) -> go.Figure:
     """

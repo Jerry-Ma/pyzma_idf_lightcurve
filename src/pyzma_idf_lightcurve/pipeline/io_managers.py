@@ -23,9 +23,9 @@ class _DbIOManager(DbIOManager):
     ) -> None:
         """Inject partition_expr to context if is is partitioned."""
         if context.has_asset_partitions:
-            if context.definition_metadata is None:
-                context.definition_metadata = {}
-            context.definition_metadata.setdefault("partition_expr", _PARTITION_EXPR)
+            context_definition_metadata = dict(context.definition_metadata or {})
+            context_definition_metadata.setdefault("partition_expr", _PARTITION_EXPR)
+            context._definition_metadata = context_definition_metadata
 
     def handle_output(
         self, context: OutputContext, obj: object
@@ -38,7 +38,8 @@ class _DbIOManager(DbIOManager):
         self, context: InputContext
     ) -> object:
         """Inject partition_expr to context if is is partitioned."""
-        self._inject_partition_expr(context.upstream_output)
+        if context.upstream_output is not None:
+            self._inject_partition_expr(context.upstream_output)
         return super().load_input(context)
 
     def _normalize_type(self, obj_type: type) -> type:
@@ -54,7 +55,8 @@ class _DbIOManager(DbIOManager):
     def _check_supported_type(self, obj_type):
         return super()._check_supported_type(self._normalize_type(obj_type))
 
-class DuckDBJSONTypeHandler(DbTypeHandler[Union[Dict, str, list, Any]]):
+
+class DuckDBJSONTypeHandler(DbTypeHandler[dict | str | list[Any]]):
     """
     Stores and loads JSON-serializable objects (dicts, strings, lists, etc.) in DuckDB.
     """
@@ -134,7 +136,7 @@ class DuckDBJSONIOManager(DuckDBIOManager):
         return [DuckDBJSONTypeHandler()]
     
     @staticmethod
-    def default_load_type() -> Optional[type]:
+    def default_load_type() -> type | None:
         return type(None)
 
     def create_io_manager(self, context) -> DbIOManager:

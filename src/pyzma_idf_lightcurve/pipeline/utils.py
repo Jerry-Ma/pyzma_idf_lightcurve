@@ -4,15 +4,15 @@ Utility functions for the IDF lightcurve processing pipeline.
 
 import subprocess
 from pathlib import Path
-from typing import List
+
 
 from dagster import AssetExecutionContext
 
 
 def check_files_and_timestamps(
     context: AssetExecutionContext,
-    input_files: List[Path],
-    output_files: List[Path],
+    input_files: list[Path],
+    output_files: list[Path],
     operation_name: str = "operation"
 ) -> tuple[bool, bool]:
     """
@@ -44,10 +44,10 @@ def check_files_and_timestamps(
 
 def run_subprocess_command(
     context: AssetExecutionContext,
-    cmd: List[str],
+    cmd: list[str],
     operation_name: str,
     partition_key: str,
-    cwd: Path = None
+    cwd: None | Path = None
 ) -> subprocess.CompletedProcess:
     """
     Helper function to run subprocess commands with consistent logging and error handling.

@@ -1,15 +1,18 @@
 """
-Template classes for name parsing and generation in the IDF pipeline.
+Generic template-based naming utilities.
+
+This module provides the general NameTemplate class for parsing and generating
+structured names using template patterns with full type safety.
 """
 
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Literal, TypeVar, Generic
-from typing_extensions import TypedDict
+from typing import TypeVar, Generic, get_args, Any
+from types import UnionType
 
+# Generic type variable for the key type - no bound since TypedDict isn't assignable to dict
+NameKeyT = TypeVar('NameKeyT')
 
-# Generic type variable for the key type
-NameKeyT = TypeVar('NameKeyT', bound=Dict[str, str])
 
 class NameTemplate(Generic[NameKeyT]):
     """
@@ -23,6 +26,11 @@ class NameTemplate(Generic[NameKeyT]):
         pattern: re.Pattern[str] - Regex pattern for parsing
     
     All methods are class methods - no instantiation needed.
+    
+    Example:
+        class MyFilename(NameTemplate[MyFilenameT]):
+            template = "{prefix}_{name}_{version}.{ext}"
+            pattern = re.compile(r"^(?P<prefix>\\w+)_(?P<name>\\w+)_(?P<version>\\d+)\\.(?P<ext>\\w+)$")
     """
     
     template: str
@@ -32,13 +40,17 @@ class NameTemplate(Generic[NameKeyT]):
         """Extract TypedDict type from generic base and validate template definition."""
         super().__init_subclass__(**kwargs)
         
-        # Get the generic base classes
-        for base in cls.__orig_bases__:
-            if hasattr(base, '__origin__') and base.__origin__ is NameTemplate:
-                # Extract the TypedDict type argument
-                if hasattr(base, '__args__') and base.__args__:
-                    cls._typed_dict_type = base.__args__[0]
-                    break
+        # Try to get the generic base classes (fallback for older Python versions)
+        try:
+            for base in getattr(cls, '__orig_bases__', []):
+                if hasattr(base, '__origin__') and base.__origin__ is NameTemplate:
+                    # Extract the TypedDict type argument
+                    if hasattr(base, '__args__') and base.__args__:
+                        cls._typed_dict_type = base.__args__[0]
+                        break
+        except (AttributeError, TypeError):
+            # Fallback: assume the class defines _typed_dict_type explicitly if needed
+            pass
         
         # Extract expected keys from TypedDict type
         if hasattr(cls, '_typed_dict_type') and hasattr(cls._typed_dict_type, '__annotations__'):
@@ -102,7 +114,7 @@ class NameTemplate(Generic[NameKeyT]):
             raise ValueError(f"Name '{name}' does not match pattern '{cls.pattern.pattern}'")
         
         # Convert None values to empty strings for optional groups
-        result = {}
+        result: dict[str, str] = {}
         for key, value in match.groupdict().items():
             result[key] = value if value is not None else ""
             
@@ -126,11 +138,11 @@ class NameTemplate(Generic[NameKeyT]):
             
         Example:
             # Change channel from ch1 to ch2
-            new_name = IDFFilename.remake("IDF_gr123_ch1_sci.fits", chan="ch2")
-            # Result: "IDF_gr123_ch2_sci.fits"
+            new_name = MyTemplate.remake("data_ch1_v1.fits", chan="ch2")
+            # Result: "data_ch2_v1.fits"
         """
         # Parse the original name
-        parsed = cls.parse(name)
+        parsed: dict[str, str] = cls.parse(name)  # type: ignore
         
         # Update with new values
         parsed.update(kwargs)
@@ -139,7 +151,7 @@ class NameTemplate(Generic[NameKeyT]):
         return cls.make(**parsed)
     
     @classmethod
-    def remake_filepath(cls, filepath: Path, parent_path: Optional[Path] = None, **kwargs) -> Path:
+    def remake_filepath(cls, filepath: Path, parent_path: Path | None = None, **kwargs) -> Path:
         """
         Parse filepath name, update with new values, and generate new Path.
         
@@ -157,14 +169,10 @@ class NameTemplate(Generic[NameKeyT]):
             KeyError: If required template parameters are missing after update
             
         Example:
-            # Change channel from ch1 to ch2, same directory
-            old_path = Path("/data/IDF_gr123_ch1_sci.fits")
-            new_path = IDFFilename.remake_filepath(old_path, chan="ch2")
-            # Result: Path("/data/IDF_gr123_ch2_sci.fits")
-            
-            # Change channel and move to different directory
-            new_path = IDFFilename.remake_filepath(old_path, Path("/workdir"), chan="ch2")
-            # Result: Path("/workdir/IDF_gr123_ch2_sci.fits")
+            # Change version and move to different directory
+            old_path = Path("/data/file_v1.txt")
+            new_path = MyTemplate.remake_filepath(old_path, Path("/workdir"), version="2")
+            # Result: Path("/workdir/file_v2.txt")
         """
         # Extract filename and remake it
         new_filename = cls.remake(filepath.name, **kwargs)
@@ -176,7 +184,7 @@ class NameTemplate(Generic[NameKeyT]):
         return target_parent / new_filename
     
     @classmethod
-    def make(cls, **kwargs: str) -> str:
+    def make(cls, **kwargs: Any) -> str:
         """
         Generate name from components.
         
@@ -195,7 +203,7 @@ class NameTemplate(Generic[NameKeyT]):
             raise KeyError(f"Missing required parameter {e} for template '{cls.template}'")
     
     @classmethod
-    def make_filepath(cls, parent_path: Path, **kwargs: str) -> Path:
+    def make_filepath(cls, parent_path: Path, **kwargs: Any) -> Path:
         """
         Generate full Path object from components.
         
@@ -210,45 +218,11 @@ class NameTemplate(Generic[NameKeyT]):
         return parent_path / filename
 
 
-# Template classes - use directly, no instantiation needed!
+def make_regex_stub_from_literal(group_name: str, literal: UnionType) -> str:
+    """Generate a regex stub from a Literal type."""
+    # Extract the possible values from the Literal
+    values = get_args(literal)
+    # Escape each value for regex and join with |
+    pattern = "|".join(re.escape(v) for v in values)
+    return f"(?P<{group_name}>{pattern})"
 
-# Type aliases for commonly used literals
-ChanT = Literal["ch1", "ch2"]
-KindT = Literal["sci", "std", "unc", "cov"]
-
-# IDF filename template with flexible suffix and extension
-# Also used for partition keys since they're derived from IDF filenames
-class PartitionKeyT(TypedDict):
-    """Type for partition key components (subset of IDF filename)."""
-    group_name: str
-    chan: ChanT
-
-class IDFFilenameT(PartitionKeyT):
-    """Type for IDF filename components with all required fields."""
-    kind: KindT
-    suffix: str  # e.g., "" or "_clean" or "_div"
-    fileext: str  # e.g., "fits" or "sexcat" or "ecsv"
-
-class PartitionKey(NameTemplate[PartitionKeyT]):
-    template = "{group_name}_{chan}"
-    pattern = re.compile(r"^(?P<group_name>gr\d+)_(?P<chan>ch[1-2])$")
-    
-    @classmethod
-    def get_components(cls, partition_key: str) -> tuple[str, ChanT]:
-        """Extract group_name and chan from partition key."""
-        parsed = cls.parse(partition_key)
-        return parsed['group_name'], parsed['chan']  # type: ignore
-
-class IDFFilename(NameTemplate[IDFFilenameT]):
-    template = "IDF_{group_name}_{chan}_{kind}{suffix}{fileext}"
-    pattern = re.compile(r"^IDF_(?P<group_name>gr\d+)_(?P<chan>ch[1-2])_(?P<kind>sci|std|unc|cov)(?P<suffix>_[^.]*)?(?P<fileext>\..+)$")
-    
-    @classmethod
-    def make_sci_filepath(cls, parent_path: Path, group_name: str, chan: ChanT) -> Path:
-        """Generate sci filepath."""
-        return cls.make_filepath(parent_path, group_name=group_name, chan=chan, kind='sci', suffix='', fileext='.fits')
-    
-    @classmethod
-    def make_unc_filepath(cls, parent_path: Path, group_name: str, chan: ChanT) -> Path:
-        """Generate unc filepath."""
-        return cls.make_filepath(parent_path, group_name=group_name, chan=chan, kind='unc', suffix='', fileext='.fits')

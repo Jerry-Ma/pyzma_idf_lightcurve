@@ -4,6 +4,7 @@ Fast development server for Dagster with multiprocessing support
 """
 
 import os
+import sys
 import tempfile
 from dagster import DagsterInstance
 import subprocess
@@ -51,38 +52,53 @@ def setup_multiprocess_instance(dev_home: Path):
     print(f"Configured for {max_processes} concurrent processes")
     return dagster_yaml_path, max_processes
 
-def main():
-    # Create temporary directory for dev
-    dev_home = Path("scratch_dagster/idf_lightcurve").resolve()
-    if dev_home.exists():
-        print(f"Using existing DAGSTER_HOME: {dev_home}")
+def run(dev_home: str, host: str = "127.0.0.1", port: int = 3001, config_file: str | None = None):
+    """Run Dagster dev server with specified configuration.
+    
+    Args:
+        dev_home: Directory for Dagster instance (required)
+        host: Host to bind the server to
+        port: Port to bind the server to
+        config_file: Path to YAML configuration file (optional)
+    """
+    # Convert dev_home to Path and resolve
+    dev_home_path = Path(dev_home).resolve()
+    if dev_home_path.exists():
+        print(f"Using existing DAGSTER_HOME: {dev_home_path}")
     else:
-        dev_home.mkdir(parents=True, exist_ok=True)
-        print(f"Created new DAGSTER_HOME: {dev_home}")
+        dev_home_path.mkdir(parents=True, exist_ok=True)
+        print(f"Created new DAGSTER_HOME: {dev_home_path}")
 
     # Setup multiprocess instance configuration
-    dagster_yaml_path, max_processes = setup_multiprocess_instance(dev_home)
+    dagster_yaml_path, max_processes = setup_multiprocess_instance(dev_home_path)
     
-    print(f"Using temp DAGSTER_HOME: {dev_home}")
+    print(f"Using DAGSTER_HOME: {dev_home_path}")
     
     # Set environment variables for optimized dev mode with multiprocessing
     env = os.environ.copy()
     env.update({
-        'DAGSTER_HOME': str(dev_home),
+        'DAGSTER_HOME': str(dev_home_path),
         'DAGSTER_AUTO_RELOAD': 'false',
     })
     
-    # Run dagster dev with multiprocessing optimizations
+    # Pass configuration file path via environment variable
+    if config_file:
+        config_file_abs = Path(config_file).resolve()
+        print(f"Loading configuration from: {config_file_abs}")
+        env['IDFLC_RESOURCE_DEFS_PATH'] = str(config_file_abs)
+    
+    # Get current Python executable to ensure we use the same environment
+    python_executable = sys.executable
+    
+    # Run dagster dev with multiprocessing optimizations using current Python executable
     cmd = [
-        'dagster', 'dev', 
+        python_executable, '-m', 'dagster', 'dev', 
         '-m', 'pyzma_idf_lightcurve.pipeline',
-        '-p', '3001',
-        '--host', '127.0.0.1',
+        '-p', str(port),
+        '--host', host,
         '--empty-workspace',
     ]
     
+    print(f"Using Python executable: {python_executable}")
     print(f"Starting dev server: {' '.join(cmd)}")
     subprocess.run(cmd, env=env)
-
-if __name__ == "__main__":
-    main()

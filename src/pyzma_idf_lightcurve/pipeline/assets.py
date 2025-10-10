@@ -5,8 +5,7 @@ Core asset definitions for the IDF lightcurve processing pipeline.
 import re
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Literal, TypeVar, Generic
-from typing_extensions import TypedDict
+from typing import Literal, TypeVar, Generic, TypedDict, get_args
 import multiprocessing
 
 from loguru import logger
@@ -31,16 +30,65 @@ from dagster import (
     define_asset_job,
 )
 
+from ..utils.naming import NameTemplate, make_regex_stub_from_literal
+from ..types import ChanT, GroupNameT, IDFFilename
+from ..lightcurve.catalog import SourceCatalog, MeasurementType
 from .config import IDFPipelineConfig
-from .templates import PartitionKey, IDFFilename
 from .utils import check_files_and_timestamps, run_subprocess_command
 
+
+
+class PartitionKeyT(TypedDict):
+    """Type for partition key components."""
+    group_name: GroupNameT
+    chan: ChanT
+
+
+class PartitionKey(NameTemplate[PartitionKeyT]):
+    """Template for IDF partition keys."""
+    template = "{group_name}_{chan}"
+    pattern = re.compile(rf"^(?P<group_name>gr\d+)_{make_regex_stub_from_literal('chan', ChanT)}$")
+    
+    @classmethod
+    def get_components(cls, partition_key: str) -> tuple[GroupNameT, ChanT]:
+        """Extract group_name and chan from partition key."""
+        parsed = cls.parse(partition_key)
+        return parsed['group_name'], parsed['chan']
 
 # Define dynamic partitions for group-channel combinations
 group_chan_partitions = DynamicPartitionsDefinition(name="group_chan")
 
+def _make_measurement_types() -> list[str]:
+    chan_names = get_args(ChanT)
 
-def discover_idf_files(input_dir: str) -> Dict[str, Dict[str, str]]:
+    # TODO load the sextractor config to get aperture info
+    col_suffixes_sex = ["auto", "iso"] + [f"aper_{i}" for i in range(8)]
+
+    # TODO implement this later 
+    col_suffixes_div = []
+
+    measurement_types = []
+    for chan in chan_names:
+        for kind, suffix in (("sci", ""), ("sci", "_clean")):
+            for col_suffix in col_suffixes_sex:
+                measurement_types.append(
+                    MeasurementType.make(
+                        chan=chan, kind=kind, suffix=suffix, col_suffix=col_suffix
+                    )
+                )
+        for col_suffix in col_suffixes_div:
+            measurement_types.append(
+                MeasurementType.make(
+                    chan=chan, kind="sci", suffix="_div", col_suffix=col_suffix
+                )
+            )
+    return measurement_types 
+
+
+measurement_types_all = _make_measurement_types()
+
+
+def discover_idf_files(input_dir: str) -> dict[str, dict[str, str]]:
     """Discover IDF files and group by partition key. Returns original file paths.
     
     Args:
@@ -78,7 +126,7 @@ def discover_idf_files(input_dir: str) -> Dict[str, Dict[str, str]]:
     return files_by_partition
 
 
-def get_or_create_symlinks_for_partition(files: Dict[str, str], workdir: str, recreate=False) -> Tuple[Dict[str, str], Dict[str, int]]:
+def get_or_create_symlinks_for_partition(files: dict[str, str], workdir: str, recreate=False) -> tuple[dict[str, str], dict[str, int]]:
     """Create symlinks in workdir for files of a specific partition. Skip existing symlinks unless recreate=True.
     
     Args:
@@ -145,13 +193,16 @@ def get_or_create_symlinks_for_partition(files: Dict[str, str], workdir: str, re
 
 
 @asset(
-    description="Symlinked IDF files organized by partition in workdir"
+    description="Symlinked IDF files organized by partition in workdir",
+    required_resource_keys={"idf_pipeline_config"}
 )
 def prepared_input_file_symlinks(
-    context: AssetExecutionContext, 
-    config: IDFPipelineConfig
+    context: AssetExecutionContext
 ) -> MaterializeResult:
     """Discover all IDF files and create symlinks for all partitions in workdir, skipping existing ones."""
+    
+    # Get static pipeline config from resources
+    config: IDFPipelineConfig = context.resources.idf_pipeline_config
     
     # Always discover all files
     context.log.info("🔍 Discovering all IDF files...")
@@ -233,7 +284,7 @@ def prepared_input_file_symlinks(
 )
 def partition_files(
     context: AssetExecutionContext,
-    prepared_input_file_symlinks: Dict[str, Dict[str, str]]
+    prepared_input_file_symlinks: dict[str, dict[str, str]]
 ) -> MaterializeResult:
     """Extract files for the current partition from the prepared files."""
     partition_key = context.partition_key
@@ -258,3 +309,407 @@ def partition_files(
             "partition_key": MetadataValue.text(partition_key)
         }
     )
+
+@asset(
+    deps=["partition_files"],
+    partitions_def=group_chan_partitions,
+    description="Normalized images from dividing sci files by coadd images",
+    required_resource_keys={"idf_pipeline_config"}
+)
+def sci_divided_by_coadd(
+    context: AssetExecutionContext,
+    partition_files: dict[str, str]
+) -> MaterializeResult:
+    """Run imarith.py to divide sci file by coadd file."""
+    # Get static pipeline config from resources
+    config: IDFPipelineConfig = context.resources.idf_pipeline_config
+    
+    partition_key = context.partition_key
+    op_name = "divide sci by coadd {partition_key}"
+    
+    if not partition_files or "sci" not in partition_files:
+        context.log.warning(f"No sci file found for partition {partition_key}")
+        return MaterializeResult(
+            value="",
+            metadata={"files_divided": MetadataValue.int(0)}
+        )
+    
+    # Extract group_name and chan from partition key
+    group_name, chan = PartitionKey.get_components(partition_key)
+    
+    # Input files
+    sci_file = Path(partition_files["sci"])
+    coadd_file = Path(config.coadd_dir) / f"coadd_{chan}.fits"  # Use configurable coadd directory
+    
+    # Output file (add _div suffix to sci file)
+    output_file = IDFFilename.remake_filepath(sci_file, suffix='_div')
+    
+    # Check files and timestamps
+    inputs_exist, outputs_up_to_date = check_files_and_timestamps(
+        context,
+        input_files=[sci_file, coadd_file],
+        output_files=[output_file],
+        operation_name=op_name
+    )
+    
+    if not inputs_exist:
+        return MaterializeResult(
+            value="",
+            metadata={"files_divided": MetadataValue.int(0)}
+        )
+    
+    if outputs_up_to_date:
+        return MaterializeResult(
+            value=str(output_file),
+            metadata={
+                "files_divided": MetadataValue.int(1),
+                "output_file": MetadataValue.text(str(output_file))
+            }
+        )
+    
+    # Run imarith.py
+    cmd = [
+        "python", config.imarith_script,
+        str(sci_file),
+        str(coadd_file),
+        "divide",
+        "-o", str(output_file)
+    ]
+    
+    result = run_subprocess_command(
+        context=context,
+        cmd=cmd,
+        operation_name=op_name,
+        partition_key=partition_key
+    )
+    
+    return MaterializeResult(
+        value=str(output_file),
+        metadata={
+            "files_divided": MetadataValue.int(1),
+            "output_file": MetadataValue.text(str(output_file)),
+            "command": MetadataValue.text(" ".join(cmd))
+        }
+    )
+
+@asset(
+    deps=["partition_files"],
+    partitions_def=group_chan_partitions,
+    description="Weight files created from uncertainty files",
+    required_resource_keys={"idf_pipeline_config"}
+)
+def wht_from_unc(
+    context: AssetExecutionContext,
+    partition_files: dict[str, str]
+) -> MaterializeResult:
+    """Run make_wht.py to create weight files from uncertainty files."""
+    # Get static pipeline config from resources
+    config: IDFPipelineConfig = context.resources.idf_pipeline_config
+    
+    partition_key = context.partition_key
+    op_name = f"make weight files {partition_key}"
+
+    if not partition_files or "unc" not in partition_files:
+        context.log.warning(f"No unc file found for partition {partition_key}")
+        return MaterializeResult(
+            value="",
+            metadata={"weight_files_created": MetadataValue.int(0)}
+        )
+    
+    # Input file
+    unc_file = Path(partition_files["unc"])
+    
+    # Output file - infer from unc filename by replacing .fits with _wht.fits
+    output_file = IDFFilename.remake_filepath(unc_file, suffix="_wht")
+    
+    # Check files and timestamps
+    inputs_exist, outputs_up_to_date = check_files_and_timestamps(
+        context,
+        input_files=[unc_file],
+        output_files=[output_file],
+        operation_name=op_name
+    )
+    
+    if not inputs_exist:
+        return MaterializeResult(
+            value="",
+            metadata={"weight_files_created": MetadataValue.int(0)}
+        )
+    
+    if outputs_up_to_date:
+        return MaterializeResult(
+            value=str(output_file),
+            metadata={
+                "weight_files_created": MetadataValue.int(1),
+                "output_file": MetadataValue.text(str(output_file))
+            }
+        )
+    
+    # Run make_wht.py
+    cmd = [
+        "python", config.make_wht_script,
+        str(unc_file)
+    ]
+    
+    result = run_subprocess_command(
+        context=context,
+        cmd=cmd,
+        operation_name=op_name,
+        partition_key=partition_key
+    )
+    
+    return MaterializeResult(
+        value=str(output_file),
+        metadata={
+            "weight_files_created": MetadataValue.int(1),
+            "output_file": MetadataValue.text(str(output_file)),
+            "command": MetadataValue.text(" ".join(cmd))
+        }
+    )
+
+@asset(
+    deps=["partition_files"],
+    partitions_def=group_chan_partitions,
+    description="Cleaned images processed with lacosmic cleaning algorithm",
+    required_resource_keys={"idf_pipeline_config"}
+)
+def sci_lac_cleaned(
+    context: AssetExecutionContext,
+    partition_files: dict[str, str],
+) -> MaterializeResult:
+    """Run lac.py to produce cleaned sci files."""
+    # Get static pipeline config from resources
+    config: IDFPipelineConfig = context.resources.idf_pipeline_config
+    
+    partition_key = context.partition_key
+    op_name = f"lac clean files {partition_key}"
+
+    if not partition_files or "sci" not in partition_files or "unc" not in partition_files:
+        context.log.warning(f"Required sci or unc file not found for partition {partition_key}")
+        return MaterializeResult(
+            value="",
+            metadata={"files_cleaned": MetadataValue.int(0)}
+        )
+    
+    # Extract group_name and chan from partition key
+    group_name, chan = PartitionKey.get_components(partition_key)
+    
+    # Find sci files and weight files
+    sci_file = Path(partition_files["sci"])
+    unc_file = Path(partition_files["unc"])
+    output_file = IDFFilename.remake_filepath(sci_file, suffix='_clean')
+    
+    # Check files and timestamps
+    inputs_exist, outputs_up_to_date = check_files_and_timestamps(
+        context,
+        input_files=[sci_file, unc_file],
+        output_files=[output_file],
+        operation_name=op_name,
+    )
+    
+    if not inputs_exist:
+        return MaterializeResult(
+            value="",
+            metadata={"files_cleaned": MetadataValue.int(0)}
+        )
+    
+    if outputs_up_to_date:
+        return MaterializeResult(
+            value=str(output_file),
+            metadata={
+                "files_cleaned": MetadataValue.int(1),
+                "output_file": MetadataValue.text(str(output_file))
+            }
+        )
+    
+    # Run lac.py
+    cmd = ["python", config.lac_script, str(sci_file), str(unc_file)]
+    
+    result = run_subprocess_command(
+        context=context,
+        cmd=cmd,
+        operation_name=op_name,
+        partition_key=partition_key
+    )
+    
+    return MaterializeResult(
+        value=str(output_file),
+        metadata={
+            "files_cleaned": MetadataValue.int(1),
+            "output_file": MetadataValue.text(str(output_file)),
+            "command": MetadataValue.text(" ".join(cmd))
+        }
+    )
+
+def _run_sextractor_on_file(
+    context: AssetExecutionContext,
+    config: IDFPipelineConfig,
+    partition_key: str,
+    sci_file: Path,
+    unc_file: Path,
+    sexcat_file: Path,
+    ecsv_file: Path,
+    label: str
+) -> bool:
+    """
+    Shared logic to run SExtractor on a single FITS file.
+    Returns True if successful, False otherwise.
+    """
+    coadd_path = Path(config.coadd_dir)
+    op_name = f"SExtractor {label} {partition_key}"
+    
+    chan_detect = "ch1"  # always use ch1 for detection
+    coadd_file = coadd_path / f"coadd_{chan_detect}.fits"
+    coadd_wht_file = coadd_path / f"coadd_{chan_detect}_wht.fits"
+    
+    # Check files and timestamps
+    inputs_exist, outputs_up_to_date = check_files_and_timestamps(
+        context,
+        input_files=[sci_file, unc_file, coadd_file, coadd_wht_file],
+        output_files=[sexcat_file, ecsv_file],
+        operation_name=op_name,
+    )
+    
+    if not inputs_exist:
+        return False
+    
+    if outputs_up_to_date:
+        return True
+    
+    # Run SExtractor
+    cmd_sex = [
+        "sex", str(coadd_file), str(sci_file),
+        "-c", config.sex_config_file,
+        "-WEIGHT_TYPE", "MAP_WEIGHT,MAP_RMS",
+        "-WEIGHT_IMAGE", ",".join([str(coadd_wht_file), str(unc_file)]),
+        "-CATALOG_NAME", str(sexcat_file)
+    ]
+    
+    result_sex = run_subprocess_command(
+        context=context,
+        cmd=cmd_sex,
+        operation_name=op_name,
+        partition_key=partition_key
+    )
+    # Convert sexcat -> ecsv using cat2cat.py
+    cmd_ecsv = [
+        "python", config.cat2cat_script,
+        str(sexcat_file),
+        "--fmt-in", "ascii.sextractor",
+        "--fmt-out", "ascii.ecsv",
+        "--output", str(ecsv_file)
+    ]
+
+    result_ecsv = run_subprocess_command(
+        context=context,
+        cmd=cmd_ecsv,
+        operation_name=f"convert to ecsv {label} {partition_key}",
+        partition_key=partition_key
+    ) 
+    return True
+
+@asset(
+    deps=["partition_files"],
+    partitions_def=group_chan_partitions,
+    description="Source catalogs extracted from sci files",
+    required_resource_keys={"idf_pipeline_config"}
+)
+def cat_from_sci(
+    context: AssetExecutionContext,
+    partition_files: dict[str, str],
+) -> MaterializeResult:
+    """Run SExtractor on sci files to produce .sexcat files."""
+    # Get static pipeline config from resources
+    config: IDFPipelineConfig = context.resources.idf_pipeline_config
+    
+    partition_key = context.partition_key
+
+    if not partition_files or "sci" not in partition_files or "unc" not in partition_files:
+        context.log.warning(f"No sci or unc file found for partition {partition_key}")
+        return MaterializeResult(
+            value="",
+            metadata={"catalog_created": MetadataValue.int(0)}
+        )
+
+    sci_file = Path(partition_files["sci"])
+    unc_file = Path(partition_files["unc"])
+    sexcat_file = IDFFilename.remake_filepath(sci_file, fileext='sexcat')
+    ecsv_file = IDFFilename.remake_filepath(sci_file, fileext='ecsv')
+    
+    success = _run_sextractor_on_file(
+        context, config, partition_key, sci_file, unc_file, sexcat_file, ecsv_file, "sci"
+    )
+    
+    if success:
+        return MaterializeResult(
+            value=str(ecsv_file),
+            metadata={
+                "catalog_created": MetadataValue.int(1),
+                "output_file": MetadataValue.text(str(ecsv_file)),
+                "input_label": MetadataValue.text("sci")
+            }
+        )
+    else:
+        return MaterializeResult(
+            value="",
+            metadata={"catalog_created": MetadataValue.int(0)}
+        )
+
+@asset(
+    deps=["partition_files", "sci_lac_cleaned"],
+    partitions_def=group_chan_partitions,
+    description="Source catalogs extracted from lac cleaned sci files",
+    required_resource_keys={"idf_pipeline_config"}
+)
+def cat_from_sci_lac_cleaned(
+    context: AssetExecutionContext,
+    sci_lac_cleaned: str,
+    partition_files: dict[str, str]
+) -> MaterializeResult:
+    """Run SExtractor on sci_clean files to produce .sexcat files."""
+    # Get static pipeline config from resources
+    config: IDFPipelineConfig = context.resources.idf_pipeline_config
+    
+    partition_key = context.partition_key
+
+    if sci_lac_cleaned == "" or "unc" not in partition_files:
+        context.log.warning(f"No lac cleaned sci file or unc found for partition {partition_key}")
+        return MaterializeResult(
+            value="",
+            metadata={"catalog_created": MetadataValue.int(0)}
+        )
+    
+    sci_clean_file = Path(sci_lac_cleaned)
+    unc_file = Path(partition_files["unc"])
+    sexcat_file = IDFFilename.remake_filepath(sci_clean_file, fileext='sexcat')
+    ecsv_file = IDFFilename.remake_filepath(sci_clean_file, fileext='ecsv')
+
+    success = _run_sextractor_on_file(
+        context, config, partition_key, sci_clean_file, unc_file, sexcat_file, ecsv_file, "sci_clean"
+    )
+    
+    if success:
+        return MaterializeResult(
+            value=str(ecsv_file),
+            metadata={
+                "catalog_created": MetadataValue.int(1),
+                "output_file": MetadataValue.text(str(ecsv_file)),
+                "file_type": MetadataValue.text("sci_clean")
+            }
+        )
+    else:
+        return MaterializeResult(
+            value="",
+            metadata={"catalog_created": MetadataValue.int(0)}
+        )
+
+
+asset_defs = [
+    prepared_input_file_symlinks,
+    partition_files,
+    sci_divided_by_coadd,
+    wht_from_unc,
+    sci_lac_cleaned,
+    cat_from_sci,
+    cat_from_sci_lac_cleaned,
+]
