@@ -212,3 +212,4 @@ src/*/_version.py
 
 design/
 examples/
+.benchmarks/

@@ -37,7 +37,13 @@ class IDFPipelineConfig(Config):
         description="SExtractor main configuration parameter name",
         min_length=1
     )
-    final_table_name: str = Field(
-        description="Final merged lightcurve table filename (should end with .ecsv)",
-        pattern=r".*\.ecsv$"
+    
+    # Lightcurve storage configuration
+    lightcurve_storage_filename: str = Field(
+        description="Zarr storage filename for lightcurves (should end with .zarr)",
+        pattern=r".*\.zarr$",
+        default="lightcurves.zarr"
+    )
+    aor_info_table: str = Field(
+        description="Path to ECSV file containing AOR information and metadata"
     )

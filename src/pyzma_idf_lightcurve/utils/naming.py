@@ -7,7 +7,8 @@ structured names using template patterns with full type safety.
 
 import re
 from pathlib import Path
-from typing import TypeVar, Generic, get_args, Any
+
+from typing import TypeVar, Generic, get_args, Any, TypedDict, ClassVar
 from types import UnionType
 
 # Generic type variable for the key type - no bound since TypedDict isn't assignable to dict
@@ -121,7 +122,7 @@ class NameTemplate(Generic[NameKeyT]):
         return result  # type: ignore
     
     @classmethod
-    def remake(cls, name: str, **kwargs) -> str:
+    def remake(cls, name: str, **kwargs: Any) -> str:
         """
         Parse name, update with new values, and generate new name.
         
@@ -151,7 +152,7 @@ class NameTemplate(Generic[NameKeyT]):
         return cls.make(**parsed)
     
     @classmethod
-    def remake_filepath(cls, filepath: Path, parent_path: Path | None = None, **kwargs) -> Path:
+    def remake_filepath(cls, filepath: Path, parent_path: Path | None = None, **kwargs: Any) -> Path:
         """
         Parse filepath name, update with new values, and generate new Path.
         
@@ -225,4 +226,31 @@ def make_regex_stub_from_literal(group_name: str, literal: UnionType) -> str:
     # Escape each value for regex and join with |
     pattern = "|".join(re.escape(v) for v in values)
     return f"(?P<{group_name}>{pattern})"
+
+
+StrSepT = TypeVar('StrSepT')
+
+
+class StrSepSegment(TypedDict):
+
+    prefix: str
+    stem: str
+    suffix: str
+
+
+class StrSepNameTemplate(NameTemplate[StrSepSegment], sep="-"):
+
+    sep: ClassVar[str]
+
+    def __init_subclass__(cls, **kwargs):
+        sep = kwargs.get("sep")
+        assert isinstance(sep, str)
+        cls.template = "{prefix}{stem}{suffix}"
+        cls.pattern = re.compile(
+            rf'^(?:(?P<prefix>[^{sep}]+{sep})(?=[^{sep}]*{sep}))?(?P<stem>[^{sep}]+)(?:(?P<suffix>{sep}[^{sep}]+))?$'
+        )
+        cls.sep = sep
+        return super().__init_subclass__(**kwargs)
+
+
 

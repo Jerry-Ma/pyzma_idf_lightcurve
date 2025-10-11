@@ -11,38 +11,115 @@ from duckdb import table
 import numpy as np
 from astropy.table import Table, Column
 from pathlib import Path
-from typing import TypedDict, ClassVar, Literal, get_args, cast
-from ..utils.naming import NameTemplate, make_regex_stub_from_literal
+from typing import TypedDict, ClassVar, Literal, get_args, cast, Callable, NamedTuple
+from ..utils.naming import NameTemplate, make_regex_stub_from_literal, StrSepNameTemplate, StrSepSegment
 from ..types import ChanT, ImageKindT, ImageSuffixT, IDFFilenameT, IDFFilename
 from functools import cached_property
+import dataclasses
 
 
-ColSuffixT = str
-ValueTypeT = Literal["mag", "mag_err"]
+# ValueKeyT = Literal["value", "uncertainty", "mag", "mag_err", "flux", "flux_err"]
 
 
-class MeasurementTypeT(TypedDict):
-
-    chan: ChanT
-    kind: ImageKindT
-    suffix: ImageSuffixT
-    col_suffix: ColSuffixT
+class MeasurementKey(StrSepNameTemplate, sep="-"): pass
 
 
-class MeasurementType(NameTemplate[MeasurementTypeT]):
+class MeasurementColname(StrSepNameTemplate, sep="_"): pass
 
-    template = "{chan}_{kind}{suffix}-{col_suffix}"
-    pattern = re.compile(
-        rf"^{make_regex_stub_from_literal('chan', ChanT)}"
-        rf"^{make_regex_stub_from_literal('kind', ImageKindT)}"
-        rf"(?P<suffix>_[^-]+|)-(?P<col_suffix>auto|iso|aper_\d+)"
+
+TableColumnMapperT = None | str | tuple[str, Callable[[np.ndarray], np.ndarray]]
+MeasurementKeySegmentMapperT = str | Callable[[StrSepSegment], str]
+
+
+class SourceCatalogDataKey(NamedTuple):
+    measurement: str
+    value: str
+    epoch: None | str
+
+
+@dataclasses.dataclass
+class SourceCatalogDataKeyInfo:
+    colname_data_keys: dict[str, SourceCatalogDataKey]
+    data_keys_colname: dict[SourceCatalogDataKey, str]
+    measurement_keys: set[str]
+    value_keys: set[str]
+    epoch_keys: set[str]
+
+
+@dataclasses.dataclass
+class SourceCatalogTableTransform:
+    ra_col: TableColumnMapperT = "ra"
+    dec_col: TableColumnMapperT = "dec"
+    x_col: TableColumnMapperT = "x"
+    y_col: TableColumnMapperT = "y"
+    obj_key_col: TableColumnMapperT = ("id", lambda col: col.astype(str))
+    colname_template_cls: type[StrSepNameTemplate] = MeasurementColname
+    data_colname_identify_regex: re.Pattern = re.compile(r"^(mag|magerr|flux|fluxerr)_.+*")
+    data_key_template_cls: type[StrSepNameTemplate] = MeasurementKey
+
+    def data_keys_to_data_colname(self, keys: SourceCatalogDataKey) -> str:
+        sep = self.colname_template_cls.sep
+        return f"{keys.value}{sep}{keys.measurement}"
+
+    def data_colname_to_data_keys(self, colname: str) -> SourceCatalogDataKey:
+        sep = self.colname_template_cls.sep
+        parts = self.colname_template_cls.parse(colname)
+        return SourceCatalogDataKey(
+            measurement=parts["suffix"].lstrip(sep),
+            value = parts["stem"],
+            epoch = None
+            )
+
+    @staticmethod
+    def _get_tbl_col_as_array(tbl, colname: str) -> np.ndarray:
+        return cast(Column, tbl.table[colname]).data
+    
+    def get_or_create_mapped(self, tbl: Table, attr_name: str) -> np.ndarray:
+        # this caches the mapped data into the table itself, to make sure we are immune to any sorting.
+        mapper = getattr(self, attr_name)
+        mapped_colname = "_source_catalog_mapped_{atrr_name}"
+        if mapped_colname not in tbl.colnames:
+            # create the mapped data
+            if isinstance(mapper, str):
+                mapped = self._get_tbl_col_as_array(tbl, mapper)
+            elif isinstance(mapper, tuple):
+                mapper, mapper_func = mapper
+                mapped = mapper_func(self._get_tbl_col_as_array(tbl, mapper))
+            else:
+                assert False
+            tbl[mapped_colname] = mapped
+        return self._get_tbl_col_as_array(tbl, mapped_colname)
+
+    def collect_data_key_info(self, tbl: Table):
+
+        colname_data_keys: dict[str, SourceCatalogDataKey] = {}
+        data_keys_colname: dict[SourceCatalogDataKey, str] = {}
+        measurement_keys: set[str] = set()
+        value_keys: set[str] = set()
+        epoch_keys: set[str] = set()
+
+        for colname in tbl.colnames:
+            m = re.match(self.data_colname_identify_regex, colname, re.IGNORECASE)
+            if not m:
+                continue
+            try:
+                data_keys = self.data_colname_to_data_keys(colname)
+            except ValueError:
+                continue
+            colname_data_keys[colname] = data_keys
+            data_keys_colname[data_keys] = colname
+            measurement_keys.add(data_keys.measurement)
+            value_keys.add(data_keys.value)
+            if data_keys.epoch is not None:
+                epoch_keys.add(data_keys.epoch)
+        return SourceCatalogDataKeyInfo(
+            colname_data_keys=colname_data_keys,
+            data_keys_colname=data_keys_colname,
+            measurement_keys=measurement_keys,
+            value_keys=value_keys,
+            epoch_keys=epoch_keys,
         )
 
-class SourceCatalogInfo(IDFFilenameT):
-    filepath: Path
-    measurement_type_colnames: dict[str, dict[ValueTypeT, str]]
-    value_types: list[ValueTypeT]
-    
 
 class SourceCatalog:
     """
@@ -51,89 +128,86 @@ class SourceCatalog:
     Provides clean interface for coordinate handling, column mapping,
     spatial sorting, and data extraction for lightcurve storage.
     """
-    
-    
-    def __init__(self, tbl: Table):
+
+    _table_transform: SourceCatalogTableTransform
+
+    def __init__(self, table: Table, table_transform: None | SourceCatalogTableTransform=None, copy=True):
         """
         Initialize with SExtractor catalog table.
         
         Args:
             catalog: Astropy Table containing SExtractor output
         """
-        self._table = tbl
-        _ = self.info  # trigger info property to cache
+        if copy:
+            table = table.copy()
+        self._table = table
+        if table_transform is None:
+            table_transform = SourceCatalogTableTransform()
+        tt = self._table_transform = table_transform
+        self._data_key_info = tt.collect_data_key_info(self.table)
 
     @property
     def table(self) -> Table:
         return self._table
+    
+    @property
+    def table_transform(self) -> SourceCatalogTableTransform:
+        return self._table_transform
 
-    @cached_property
-    def filepath(self) -> Path:
-        tbl = self.table
-        if not tbl.meta or 'filepath' not in tbl.meta:
-            raise ValueError("Table metadata does not contain 'filepath'")
-        return Path(tbl.meta['filepath'])
+    @property
+    def data_key_info(self) -> SourceCatalogDataKeyInfo:
+        return self._data_key_info
 
-    @cached_property
-    def info(self) -> SourceCatalogInfo:
-        filepath = self.filepath
-        file_info = IDFFilename.parse(filepath.name)
-        measurement_type_colnames = {}
-        # TODO get this from the catalog columns
-        for col_suffix in ["auto", "iso"]:
-            mt = MeasurementType.make(col_suffix=col_suffix, **file_info)
-            colnames = {
-                "mag": f"MAG_{col_suffix.upper()}",
-                "mag_err": f"MAGERR_{col_suffix.upper()}"
-            }
-            measurement_type_colnames[mt] = colnames
-        return {
-            "filepath": filepath,
-            "measurement_type_colnames": measurement_type_colnames,
-            "value_types": ["mag", "mag_err"],
-            **file_info,
-        }
+    @property
+    def measurement_keys(self) -> set[str]:
+        return self.data_key_info.measurement_keys
+   
+    @property
+    def value_keys(self) -> set[str]:
+        return self.data_key_info.value_keys
 
-    def _get_array(self, column_name: str) -> np.ndarray:
-        return cast(Column, self.table[column_name]).data
-
-    @cached_property
-    def object_ids(self) -> np.ndarray:
-        return self._get_array('object_id')
+    @property
+    def epoch_keys(self) -> set[str]:
+        return self._data_key_info.epoch_keys
 
     @cached_property
     def ra_values(self) -> np.ndarray:
-        return self._get_array('ALPHA_J2000')
+        return self.table_transform.get_or_create_mapped(self.table, "ra_col")
         
-    @cached_property
+    @property
     def dec_values(self) -> np.ndarray:
-        return self._get_array('DELTA_J2000')
+        return self.table_transform.get_or_create_mapped(self.table, "dec_col")
         
-    @cached_property
+    @property
     def x_values(self) -> np.ndarray:
-        return self._get_array("X_IMAGE")
+        return self.table_transform.get_or_create_mapped(self.table, "x_col")
         
-    @cached_property
+    @property
     def y_values(self) -> np.ndarray:
-        return self._get_array("Y_IMAGE")
-    
-    def get_coordinate_dict(self) -> dict[int, dict[str, float]]:
+        return self.table_transform.get_or_create_mapped(self.table, "y_col")
+ 
+    @property
+    def object_keys(self) -> np.ndarray:
+        return self.table_transform.get_or_create_mapped(self.table, "obj_key_col")
+
+    @cached_property
+    def object_key_coordinates(self) -> dict[str, dict[str, float]]:
         """
         Create coordinate lookup dictionary for all objects.
         
         Returns:
-            Dictionary mapping object_id to coordinate dict with keys:
+            Dictionary mapping object_key (str) to coordinate dict with keys:
             'ra', 'dec', 'x', 'y'
         """
         coord_dict = {}
-        obj_ids = self.object_ids
+        obj_keys = self.object_keys
         ra_vals = self.ra_values
         dec_vals = self.dec_values  
         x_vals = self.x_values
         y_vals = self.y_values
         
-        for i, obj_id in enumerate(obj_ids):
-            coord_dict[int(obj_id)] = {
+        for i, obj_key in enumerate(obj_keys):
+            coord_dict[obj_key] = {
                 'ra': float(ra_vals[i]),
                 'dec': float(dec_vals[i]), 
                 'x': float(x_vals[i]),
@@ -142,25 +216,25 @@ class SourceCatalog:
             
         return coord_dict
     
-    def get_spatially_ordered_ids(self, grid_divisions: int = 20) -> list[int]:
+    def get_spatially_ordered_keys(self, grid_divisions: int = 20) -> list[str]:
         """
-        Sort object IDs by spatial location using grid-based approach.
+        Sort object keys by spatial location using grid-based approach.
         
         Args:
             grid_divisions: Number of divisions in each spatial dimension
             
         Returns:
-            List of object IDs sorted by spatial grid position
+            List of object keys (strings) sorted by spatial grid position
         """
         ra_vals = self.ra_values
         dec_vals = self.dec_values
-        object_ids = self.object_ids
+        object_keys = self.object_keys
         
         # Remove NaN coordinates
         valid_mask = ~(np.isnan(ra_vals) | np.isnan(dec_vals))
         if not np.any(valid_mask):
             print("Warning: No valid coordinates found, using original object order")
-            return object_ids.tolist()
+            return object_keys.tolist()
         
         ra_min, ra_max = ra_vals[valid_mask].min(), ra_vals[valid_mask].max()
         dec_min, dec_max = dec_vals[valid_mask].min(), dec_vals[valid_mask].max()
@@ -181,98 +255,56 @@ class SourceCatalog:
         
         # Sort by spatial grid cell
         sort_indices = np.argsort([spatial_key(i) for i in range(len(self.table))])
-        sorted_object_ids = object_ids[sort_indices]
+        sorted_object_keys = object_keys[sort_indices].tolist() 
         
-        print(f"Spatially sorted {len(sorted_object_ids)} objects using {grid_divisions}x{grid_divisions} grid")
-        return sorted_object_ids.tolist()
+        print(f"Spatially sorted {len(sorted_object_keys)} objects using {grid_divisions}x{grid_divisions} grid")
+        return sorted_object_keys
     
-    def get_coordinate_arrays_for_objects(self, object_ids: list[int]) -> tuple[list[float], list[float], list[float], list[float]]:
+    def get_coordinate_arrays_for_objects(self, object_keys: list[str]) -> tuple[list[float], list[float], list[float], list[float]]:
         """
-        Get coordinate arrays for specific object IDs in given order.
+        Get coordinate arrays for specific object keys in given order.
         
         Args:
-            object_ids: List of object IDs in desired order
+            object_keys: List of object keys (strings) in desired order
             
         Returns:
-            Tuple of (ra_vals, dec_vals, x_vals, y_vals) lists in object_id order
+            Tuple of (ra_vals, dec_vals, x_vals, y_vals) lists in object_key order
         """
-        coord_dict = self.get_coordinate_dict()
+        coord_dict = self.object_key_coordinates
         
-        ra_vals = [coord_dict.get(obj_id, {}).get('ra', np.nan) for obj_id in object_ids]
-        dec_vals = [coord_dict.get(obj_id, {}).get('dec', np.nan) for obj_id in object_ids]
-        x_vals = [coord_dict.get(obj_id, {}).get('x', np.nan) for obj_id in object_ids]
-        y_vals = [coord_dict.get(obj_id, {}).get('y', np.nan) for obj_id in object_ids]
+        ra_vals = [coord_dict.get(obj_key, {}).get('ra', np.nan) for obj_key in object_keys]
+        dec_vals = [coord_dict.get(obj_key, {}).get('dec', np.nan) for obj_key in object_keys]
+        x_vals = [coord_dict.get(obj_key, {}).get('x', np.nan) for obj_key in object_keys]
+        y_vals = [coord_dict.get(obj_key, {}).get('y', np.nan) for obj_key in object_keys]
         
         return ra_vals, dec_vals, x_vals, y_vals
     
-    @property
-    def measurement_types(self) -> list[str]:
-        return list(self.info["measurement_type_colnames"].keys())
-
-    def extract_measurements(self, measurement_types: list[str]) -> dict[str, dict[ValueTypeT, np.ndarray]]:
+    def extract_measurements(self, measurement_keys: list[str]) -> dict[SourceCatalogDataKey, np.ndarray]:
         """
-        Extract magnitude and error measurements for given measurement types.
+        Extract magnitude and error measurements for given measurement keys.
         
         Args:
-            measurement_types: List of measurement type identifiers
+            measurement_keys: List of measurement key identifiers
             
         Returns:
             Dictionary mapping measurement types to (magnitude, error) arrays
         """
         measurements = {}
         
-        for meas_type in measurement_types:
-            colnames = self.info["measurement_type_colnames"].get(meas_type, None)
-            if colnames is None:
-                print(f"Warning: Could not find columns for measurement type '{meas_type}'")
-                continue
-            mag_col = colnames["mag"]
-            err_col = colnames["mag_err"]
-            mag_data = self._get_array(mag_col)
-            err_data = self._get_array(err_col)
-
-            measurements[meas_type] = {
-                "mag": mag_data,
-                "mag_err": err_data
-            }
-
+        for data_key, colname in self.data_key_info.data_keys_colname.items():
+            if data_key.measurement in measurement_keys:
+                measurements[data_key.measurement] = self.table_transform._get_tbl_col_as_array(self.table, colname)
         return measurements
-    
-    def get_valid_measurement_mask(self, measurement_types: list[str]) -> np.ndarray:
-        """
-        Get boolean mask for objects with valid measurements.
-        
-        Args:
-            measurement_types: List of measurement types to check
-            
-        Returns:
-            Boolean array indicating which objects have valid measurements
-        """
-        tbl = self.table
-        measurements = self.extract_measurements(measurement_types)
-        
-        if not measurements:
-            return np.zeros(len(tbl), dtype=bool)
 
-        # Combine validity across all measurement types
-        valid_mask = np.ones(len(tbl), dtype=bool)
-        
-        for meas_type, values in measurements.items():
-            mag_data = values["mag"]
-            err_data = values["mag_err"]
-            # Check for finite values and reasonable ranges
-            print(mag_data)
-            print(err_data)
-            mag_valid = np.isfinite(mag_data) & (mag_data > 0) & (mag_data < 50)
-            err_valid = np.isfinite(err_data) & (err_data > 0) & (err_data < 10)
-            valid_mask &= mag_valid & err_valid
-            
-        return valid_mask
-    
     def __len__(self) -> int:
         """Return number of objects in catalog."""
         return len(self.table)
-        
+
+       
     def __repr__(self) -> str:
         """String representation of catalog."""
-        return f"SourceCatalog(n_objs={len(self)}, n_meas={len(self.info['measurement_type_colnames'])})"
+        n_objs = len(self.object_keys),
+        n_measurements = len(self.measurement_keys),
+        n_values = len(self.value_keys),
+        n_epochs = len(self.epoch_keys),
+        return f"SourceCatalog({n_objs}, {n_measurements}, {n_values}, {n_epochs})"
