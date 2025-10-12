@@ -12,7 +12,7 @@ import numpy as np
 from astropy.table import Table, Column
 from pathlib import Path
 from typing import TypedDict, ClassVar, Literal, get_args, cast, Callable, NamedTuple
-from ..utils.naming import NameTemplate, make_regex_stub_from_literal, StrSepNameTemplate, StrSepSegment
+from ..utils.naming import NameTemplate, make_regex_stub_from_literal, StrSepNameTemplate, DashSeparated, UnderscoreSeparated, StrSepSegment
 from ..types import ChanT, ImageKindT, ImageSuffixT, IDFFilenameT, IDFFilename
 from functools import cached_property
 import dataclasses
@@ -21,10 +21,12 @@ import dataclasses
 # ValueKeyT = Literal["value", "uncertainty", "mag", "mag_err", "flux", "flux_err"]
 
 
-class MeasurementKey(StrSepNameTemplate, sep="-"): pass
+class MeasurementKey(DashSeparated):
+    pass
 
 
-class MeasurementColname(StrSepNameTemplate, sep="_"): pass
+class MeasurementColname(UnderscoreSeparated):
+    match_prefix: bool = False
 
 
 TableColumnMapperT = None | str | tuple[str, Callable[[np.ndarray], np.ndarray]]
@@ -54,30 +56,30 @@ class SourceCatalogTableTransform:
     y_col: TableColumnMapperT = "y"
     obj_key_col: TableColumnMapperT = ("id", lambda col: col.astype(str))
     colname_template_cls: type[StrSepNameTemplate] = MeasurementColname
-    data_colname_identify_regex: re.Pattern = re.compile(r"^(mag|magerr|flux|fluxerr)_.+*")
+    data_colname_identify_regex: re.Pattern = re.compile(r"^(mag|magerr|flux|fluxerr)_.+", re.IGNORECASE)
     data_key_template_cls: type[StrSepNameTemplate] = MeasurementKey
 
     def data_keys_to_data_colname(self, keys: SourceCatalogDataKey) -> str:
         sep = self.colname_template_cls.sep
-        return f"{keys.value}{sep}{keys.measurement}"
+        return f"{keys.value}{sep}{keys.measurement}".lower()
 
     def data_colname_to_data_keys(self, colname: str) -> SourceCatalogDataKey:
         sep = self.colname_template_cls.sep
-        parts = self.colname_template_cls.parse(colname)
+        parts = self.colname_template_cls.parse(colname.lower())
         return SourceCatalogDataKey(
             measurement=parts["suffix"].lstrip(sep),
-            value = parts["stem"],
-            epoch = None
-            )
+            value=parts["stem"],
+            epoch=None,
+        )
 
     @staticmethod
     def _get_tbl_col_as_array(tbl, colname: str) -> np.ndarray:
-        return cast(Column, tbl.table[colname]).data
+        return cast(Column, tbl[colname]).data
     
     def get_or_create_mapped(self, tbl: Table, attr_name: str) -> np.ndarray:
         # this caches the mapped data into the table itself, to make sure we are immune to any sorting.
         mapper = getattr(self, attr_name)
-        mapped_colname = "_source_catalog_mapped_{atrr_name}"
+        mapped_colname = f"_source_catalog_mapped_{attr_name}"
         if mapped_colname not in tbl.colnames:
             # create the mapped data
             if isinstance(mapper, str):
@@ -99,7 +101,7 @@ class SourceCatalogTableTransform:
         epoch_keys: set[str] = set()
 
         for colname in tbl.colnames:
-            m = re.match(self.data_colname_identify_regex, colname, re.IGNORECASE)
+            m = self.data_colname_identify_regex.match(colname)
             if not m:
                 continue
             try:
@@ -121,6 +123,8 @@ class SourceCatalogTableTransform:
         )
 
 
+default_source_catalog_table_transform = SourceCatalogTableTransform()
+
 class SourceCatalog:
     """
     Encapsulates operations on SExtractor source catalogs.
@@ -131,7 +135,7 @@ class SourceCatalog:
 
     _table_transform: SourceCatalogTableTransform
 
-    def __init__(self, table: Table, table_transform: None | SourceCatalogTableTransform=None, copy=True):
+    def __init__(self, table: Table, table_transform: SourceCatalogTableTransform=default_source_catalog_table_transform, copy=True):
         """
         Initialize with SExtractor catalog table.
         
@@ -141,8 +145,6 @@ class SourceCatalog:
         if copy:
             table = table.copy()
         self._table = table
-        if table_transform is None:
-            table_transform = SourceCatalogTableTransform()
         tt = self._table_transform = table_transform
         self._data_key_info = tt.collect_data_key_info(self.table)
 
@@ -279,32 +281,50 @@ class SourceCatalog:
         
         return ra_vals, dec_vals, x_vals, y_vals
     
-    def extract_measurements(self, measurement_keys: list[str]) -> dict[SourceCatalogDataKey, np.ndarray]:
-        """
-        Extract magnitude and error measurements for given measurement keys.
-        
-        Args:
-            measurement_keys: List of measurement key identifiers
-            
-        Returns:
-            Dictionary mapping measurement types to (magnitude, error) arrays
-        """
-        measurements = {}
-        
+    @cached_property
+    def data(self) -> dict[SourceCatalogDataKey, np.ndarray]:
+        data = {}
         for data_key, colname in self.data_key_info.data_keys_colname.items():
-            if data_key.measurement in measurement_keys:
-                measurements[data_key.measurement] = self.table_transform._get_tbl_col_as_array(self.table, colname)
-        return measurements
+            data[data_key] = self.table_transform._get_tbl_col_as_array(self.table, colname)
+        return data
 
     def __len__(self) -> int:
         """Return number of objects in catalog."""
         return len(self.table)
 
-       
     def __repr__(self) -> str:
         """String representation of catalog."""
-        n_objs = len(self.object_keys),
+        n_objs = len(self.object_keys)
         n_measurements = len(self.measurement_keys),
-        n_values = len(self.value_keys),
-        n_epochs = len(self.epoch_keys),
-        return f"SourceCatalog({n_objs}, {n_measurements}, {n_values}, {n_epochs})"
+        n_values = len(self.value_keys)
+        n_epochs = len(self.epoch_keys)
+        info_str = f"{n_objs}, {n_measurements}, {n_values}"
+        if n_epochs > 0:
+            info_str += f", {n_epochs}"
+        return f"SourceCatalog({info_str})"
+    
+
+@dataclasses.dataclass
+class SExtractorTableTransform(SourceCatalogTableTransform):
+    ra_col: TableColumnMapperT = "ALPHA_J2000"
+    dec_col: TableColumnMapperT = "DELTA_J2000"
+    x_col: TableColumnMapperT = "X_IMAGE"
+    y_col: TableColumnMapperT = "Y_IMAGE"
+    obj_key_col: TableColumnMapperT = ("NUMBER", lambda col: col.astype(str))
+    colname_template_cls: type[StrSepNameTemplate] = MeasurementColname
+    data_colname_identify_regex: re.Pattern = re.compile(r"^(MAG|MAGERR|FLUX|FLUXERR)_.+")
+    data_key_template_cls: type[StrSepNameTemplate] = MeasurementKey
+
+    def data_keys_to_data_colname(self, keys: SourceCatalogDataKey) -> str:
+        sep = self.colname_template_cls.sep
+        return f"{keys.value}{sep}{keys.measurement}".upper()
+
+    def data_colname_to_data_keys(self, colname: str) -> SourceCatalogDataKey:
+        sep = self.colname_template_cls.sep
+        parts = self.colname_template_cls.parse(colname.lower())
+        return SourceCatalogDataKey(
+            measurement=parts["suffix"].lstrip(sep),
+            value = parts["stem"],
+            epoch = None,
+            )
+

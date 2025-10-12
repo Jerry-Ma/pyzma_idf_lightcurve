@@ -238,19 +238,57 @@ class StrSepSegment(TypedDict):
     suffix: str
 
 
-class StrSepNameTemplate(NameTemplate[StrSepSegment], sep="-"):
+class StrSepNameTemplate(NameTemplate[StrSepSegment]):
+    """Name template that parses names separated by a delimiter.
+    
+    Subclasses should set the 'sep' class attribute to define their separator.
+    """
 
-    sep: ClassVar[str]
+    match_prefix: bool = True
+    match_suffix: bool = True
+    sep: ClassVar[str] = NotImplemented
 
     def __init_subclass__(cls, **kwargs):
-        sep = kwargs.get("sep")
-        assert isinstance(sep, str)
+        super().__init_subclass__(**kwargs)
+        # Use the class's sep attribute to build pattern
+        sep = cls.sep
+        assert isinstance(sep, str), f"sep must be a string, got {type(sep)}"
+
+        match_prefix = cls.match_prefix
+        match_suffix = cls.match_suffix
+        assert match_prefix + match_suffix >= 1, "at least one of match_{prefix|suffix} should be True"
+        if match_prefix and match_suffix:
+            re_str = rf'^(?:(?P<prefix>[^{sep}]+{sep})(?=[^{sep}]*{sep}))?(?P<stem>[^{sep}]+)(?P<suffix>{sep}.+)?$'
+        elif match_prefix:
+            # greed on prefix
+            re_str = rf'^(?P<prefix>.+{sep})?(?P<stem>[^{sep}]+)$'
+        elif match_suffix:
+            # greed on suffix
+            re_str = rf'^(?P<stem>[^{sep}]+)(?P<suffix>{sep}.+)?$'
+        else:
+            assert False
         cls.template = "{prefix}{stem}{suffix}"
-        cls.pattern = re.compile(
-            rf'^(?:(?P<prefix>[^{sep}]+{sep})(?=[^{sep}]*{sep}))?(?P<stem>[^{sep}]+)(?:(?P<suffix>{sep}[^{sep}]+))?$'
-        )
-        cls.sep = sep
-        return super().__init_subclass__(**kwargs)
+        cls.pattern = re.compile(re_str)
+    
+    @classmethod
+    def parse(cls, name: str) -> StrSepSegment:
+        """Parse name and ensure all three keys (prefix, stem, suffix) are present."""
+        result = super().parse(name)
+        # Ensure all three keys exist, filling with empty string if not in regex groups
+        if "prefix" not in result:
+            result["prefix"] = ""
+        if "suffix" not in result:
+            result["suffix"] = ""
+        return result  # type: ignore
 
 
+class UnderscoreSeparated(StrSepNameTemplate):
+    sep: ClassVar[str] = "_"
 
+
+class DashSeparated(StrSepNameTemplate):
+    sep: ClassVar[str] = "-"
+
+
+class DotSeparated(StrSepNameTemplate):
+    sep: ClassVar[str] = "."
