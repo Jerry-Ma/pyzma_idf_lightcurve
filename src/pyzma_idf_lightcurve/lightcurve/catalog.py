@@ -8,6 +8,7 @@ and spatial sorting for efficient storage access patterns.
 
 import re
 from duckdb import table
+from loguru import logger
 import numpy as np
 from astropy.table import Table, Column
 from pathlib import Path
@@ -156,6 +157,9 @@ class SourceCatalog:
     def table_transform(self) -> SourceCatalogTableTransform:
         return self._table_transform
 
+    def get_table_data(self, colname: str) -> np.ndarray:
+        return self.table_transform._get_tbl_col_as_array(self.table, colname)
+
     @property
     def data_key_info(self) -> SourceCatalogDataKeyInfo:
         return self._data_key_info
@@ -218,7 +222,7 @@ class SourceCatalog:
             
         return coord_dict
     
-    def get_spatially_ordered_keys(self, grid_divisions: int = 20) -> list[str]:
+    def _get_spatially_ordered_keys(self, grid_divisions: int = 20) -> tuple[list[int], list[str]]:
         """
         Sort object keys by spatial location using grid-based approach.
         
@@ -256,11 +260,19 @@ class SourceCatalog:
             return ra_bin * grid_divisions + dec_bin
         
         # Sort by spatial grid cell
-        sort_indices = np.argsort([spatial_key(i) for i in range(len(self.table))])
+        sort_keys = [spatial_key(i) for i in range(len(self.table))]
+        sort_indices = np.argsort(sort_keys)
         sorted_object_keys = object_keys[sort_indices].tolist() 
         
         print(f"Spatially sorted {len(sorted_object_keys)} objects using {grid_divisions}x{grid_divisions} grid")
-        return sorted_object_keys
+        return sort_keys, sorted_object_keys
+    
+    def sort_objects_by_position(self, **kwargs):
+        sort_keys, _ = self._get_spatially_ordered_keys(**kwargs)
+        self.table["_source_catalog_spatial_sort_key"] = sort_keys
+        self.table.sort("_source_catalog_spatial_sort_key")
+        logger.info(f"Sorted objects by spatial position")
+        
     
     def get_coordinate_arrays_for_objects(self, object_keys: list[str]) -> tuple[list[float], list[float], list[float], list[float]]:
         """
@@ -302,7 +314,7 @@ class SourceCatalog:
         if n_epochs > 0:
             info_str += f", {n_epochs}"
         return f"SourceCatalog({info_str})"
-    
+
 
 @dataclasses.dataclass
 class SExtractorTableTransform(SourceCatalogTableTransform):

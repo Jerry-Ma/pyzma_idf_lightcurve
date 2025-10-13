@@ -2,12 +2,14 @@
 Core asset definitions for the IDF lightcurve processing pipeline.
 """
 
+import json
 import re
 import subprocess
 from pathlib import Path
 from typing import Literal, TypeVar, Generic, TypedDict, get_args
 import multiprocessing
 from functools import cached_property
+from astropy.time import Time
 
 from loguru import logger
 import numpy as np
@@ -35,27 +37,11 @@ from dagster import (
 
 from ..utils.naming import NameTemplate, make_regex_stub_from_literal
 from ..types import ChanT, GroupNameT, IDFFilename
-from ..lightcurve.catalog import SourceCatalog, MeasurementKey
+from ..lightcurve.catalog import SourceCatalog, MeasurementKey, SExtractorTableTransform, TableColumnMapperT, SourceCatalogDataKey
 from ..lightcurve.datamodel import LightcurveStorage
 from .config import IDFPipelineConfig
 from .utils import check_files_and_timestamps, run_subprocess_command
-
-
-class IDFSourceCatalog(SourceCatalog):
-    """IDF-specific source catalog with custom object key formatting.
-    
-    Generates object keys with 'I' prefix (for IRAC instrument) followed by the NUMBER.
-    This provides clear, instrument-specific identifiers for labeled dimension access.
-    """
-    
-    @cached_property
-    def object_keys(self) -> list[str]:
-        """Generate IRAC-prefixed object keys.
-        
-        Returns:
-            List of object keys in format 'I{NUMBER}' where I indicates IRAC instrument
-        """
-        return [f"I{obj_id}" for obj_id in self.object_ids]
+import dataclasses
 
 
 class PartitionKeyT(TypedDict):
@@ -79,42 +65,34 @@ class PartitionKey(NameTemplate[PartitionKeyT]):
 group_chan_partitions = DynamicPartitionsDefinition(name="group_chan")
 
 
-_tbl_name_fmt = "{chan}_{kind}{suffix}"
+@dataclasses.dataclass
+class IDFSExtractorTableTransform(SExtractorTableTransform):
 
+    table_key: str |None = None
+    epoch_key: str |None = None
+    obj_key_col: TableColumnMapperT = ("NUMBER", lambda col: np.array([f"I{v}" for v in col]))
+    
+    def __post_init__(self):
+        if self.table_key is None or self.epoch_key is None:
+            raise ValueError("table_key and epoch_key must be provided")
 
-def make_table_name(filepath: Path) -> str:
-    return _tbl_name_fmt.format(**IDFFilename.parse(filepath.name))
+    def data_keys_to_data_colname(self, keys: SourceCatalogDataKey) -> str:
+        sep = self.colname_template_cls.sep
+        colname_suffix = re.sub(f"{self.table_key}", "", keys.measurement)
+        return f"{keys.value}{sep}{colname_suffix}".upper()
 
+    def data_colname_to_data_keys(self, colname: str) -> SourceCatalogDataKey:
+        sep = self.colname_template_cls.sep
+        parts = self.colname_template_cls.parse(colname.lower())
+        return SourceCatalogDataKey(
+            measurement=f"{self.table_key}{parts['suffix']}",
+            value = parts["stem"],
+            epoch = self.epoch_key,
+            )
 
-def _make_measurement_keys() -> list[str]:
-    chan_names = get_args(ChanT)
-
-    # TODO load the sextractor config to get aperture info
-    col_suffixes_sex = ["auto", "iso"] + [f"aper_{i}" for i in range(1, 9)]
-
-    # TODO implement this later 
-    col_suffixes_div = []
-
-    def _make_measurement_key(chan: str, kind: str, suffix: str, col_suffix: str) -> str:
-        tbl_name = _tbl_name_fmt.format(chan=chan, kind=kind, suffix=suffix)
-        return MeasurementKey.make(tbl_name=tbl_name, col_suffix=col_suffix)
-
-    measurement_keys = []
-    for chan in chan_names:
-        for kind, suffix in (("sci", ""), ("sci", "_clean")):
-            for col_suffix in col_suffixes_sex:
-                tbl_name = _tbl_name_fmt.format(chan=chan, kind=kind, suffix=suffix)
-                measurement_keys.append(
-                    _make_measurement_key(chan=chan, kind=kind, suffix=suffix, col_suffix=col_suffix)
-                )
-        for col_suffix in col_suffixes_div:
-            measurement_keys.append(
-                _make_measurement_key(chan=chan, kind="sci", suffix="_div", col_suffix=col_suffix)
-                )
-    return measurement_keys 
-
-
-measurement_keys_all = _make_measurement_keys()
+def make_table_key(filepath: Path) -> str:
+    _tbl_key_fmt = "{chan}_{kind}{suffix}"
+    return _tbl_key_fmt.format(**IDFFilename.parse(filepath.name))
 
 
 def discover_idf_files(input_dir: str) -> dict[str, dict[str, str]]:
@@ -757,9 +735,7 @@ def idf_lightcurve_storage_empty(
     logger.info(f"Creating lightcurve storage at {storage_path}")
     logger.info("Using static configuration (no dependencies on other assets)")
     
-    # Load superstack catalogs for spatial information
-    # Combine ch1 and ch2 catalogs to get all sources
-    logger.info("Loading superstack catalogs for spatial information...")
+    logger.info("Loading superstack catalogs...")
     
     chan_superstack = "ch1"
     superstack_catalog_path = Path(config.coadd_dir) / f"coadd_{chan_superstack}.ecsv"
@@ -768,10 +744,37 @@ def idf_lightcurve_storage_empty(
         raise FileNotFoundError(f"Superstack catalog not found: {superstack_catalog_path}")
 
     tbl_superstack = Table.read(superstack_catalog_path, format='ascii.ecsv')
+    cat_superstack = SourceCatalog(
+        tbl_superstack, table_transform=IDFSExtractorTableTransform(
+            table_key="superstack",
+            epoch_key="superstack",
+        ))
+    # make sure it is sorted by position so nearby sources are adjacent
+    cat_superstack.sort_objects_by_position()
+    logger.info(f"Loaded superstack catalog: {len(cat_superstack)} sources")
 
-    source_catalog = IDFSourceCatalog(tbl_superstack, name=f"{chan_superstack}_superstack")
-    logger.info(f"Loaded superstack catalog: {len(tbl_superstack)} sources")
-    
+   
+    # collect info from superstack catalog, expand for all chans
+    # and input kinds
+    measurement_keys = []
+
+    # TODO handle div input measurement keys separately
+    chan_names = get_args(ChanT)
+    for chan in chan_names:
+        for input_kind in ["sci", "sci_clean"]:
+            measurement_keys.extend([key.replace("superstack", f"{chan}_{input_kind}") for key in cat_superstack.measurement_keys])
+    logger.info(f"Use {len(measurement_keys)} measurement keys from all input:\n{measurement_keys}")
+
+    # value_keys = list(cat_superstack.value_keys)
+    value_keys = ["mag", "magerr"]
+    logger.info(f"Use {len(value_keys)} value keys from all input:\n{value_keys}")
+
+    # populate dim_vars from superstack
+    dim_vars_object = {}
+    for colname in cat_superstack.table.colnames:
+        logger.info(f"add {colname} to dim_vars_object")
+        dim_vars_object[f"superstack_{colname}".lower()] = cat_superstack.get_table_data(colname)
+
     # Load AOR info table to get list of temporal grouping keys
     aor_info_path = Path(config.aor_info_table)
     logger.info(f"Loading AOR info from {aor_info_path}...")
@@ -781,68 +784,62 @@ def idf_lightcurve_storage_empty(
     tbl_aors = Table.read(aor_info_path, format='ascii.ecsv')
     # Sort by reqkey (integer AOR) to ensure temporal ordering
     tbl_aors.sort('reqkey')
+
     # Extract epoch keys - use group_name from the table
     epoch_keys = [str(group_name) for group_name in tbl_aors['group_name']]
     logger.info(f"Found {len(epoch_keys)} epochs from info table (sorted by reqkey)")
-    
+    # populate dim_vars from aors table
+    dim_vars_epoch = {}
+    for colname in tbl_aors.colnames:
+        coldata = tbl_aors[colname]
+
+        if isinstance(coldata, Time):
+            coldata = coldata.datetime64
+        else:
+            coldata = coldata.data
+        logger.info(f"add {colname} to dim_vars_object")
+        dim_vars_epoch[f"epoch_{colname}".lower()] = coldata
     # Create storage with static configuration
-    logger.info(f"Creating Zarr storage with {len(epoch_keys)} epochs and {len(measurement_keys_all)} measurement keys")
+    logger.info(f"Creating Zarr storage with {len(epoch_keys)} epochs and {len(measurement_keys)} measurement keys")
     storage = LightcurveStorage(
         storage_path=storage_path,
-        enable_spatial_chunking=True
     )
     
-    storage.create_storage(
-        source_catalog=source_catalog,
+    storage.create_for_per_epoch_write(
+        source_catalog=cat_superstack,
+        measurement_keys=measurement_keys,
+        value_keys=value_keys,
         epoch_keys=epoch_keys,
-        measurement_keys=measurement_keys_all,
-        tbl_aors=tbl_aors
+        dim_vars={
+            "object": dim_vars_object,
+            "epoch": dim_vars_epoch,
+        },
     )
     
     logger.info("✓ Storage created successfully")
     logger.info(f"  • Path: {storage_path}")
-    logger.info(f"  • Sources: {len(source_catalog.table)}")
+    logger.info(f"  • Sources: {len(cat_superstack)}")
     logger.info(f"  • Epochs: {len(epoch_keys)}")
-    logger.info(f"  • Measurement keys: {len(measurement_keys_all)}")
-    
+    logger.info(f"  • Measurement keys: {len(measurement_keys)}")
+    logger.info(f"  • Value keys: {len(value_keys)}")
+
     # Get zarr storage info for verification by reading back the storage
     storage_verify = LightcurveStorage(storage_path=storage_path)
-    storage_verify.load_storage()
+    storage_verify.load_for_per_epoch_write()
     
     # Extract chunk information from xarray encoding
-    if storage_verify.lightcurves is not None:
-        # Get encoding info which contains chunking details
-        encoding_info = storage_verify.lightcurves.encoding
-        chunks_info = encoding_info.get('chunks', 'Not available')
-        preferred_chunks = encoding_info.get('preferred_chunks', {})
-        
-        logger.info(f"  • Zarr chunks: {chunks_info}")
-        logger.info(f"  • Preferred chunks: {preferred_chunks}")
-    else:
-        chunks_info = 'Failed to load'
-        preferred_chunks = {}
-    
+    metadata = {
+        "storage_info": MetadataValue.text(json.dumps(storage_verify.get_storage_info(), indent=2))
+    }
     return MaterializeResult(
-        metadata={
-            "storage_path": MetadataValue.path(str(storage_path)),
-            "n_sources": MetadataValue.int(len(source_catalog.table)),
-            "n_epochs": MetadataValue.int(len(epoch_keys)),
-            "n_measurement_keys": MetadataValue.int(len(measurement_keys_all)),
-            "epoch_keys_first_10": MetadataValue.text(", ".join(epoch_keys[:10])),
-            "measurement_keys": MetadataValue.text(", ".join(measurement_keys_all)),
-            # Zarr storage metadata for verification
-            "zarr_chunks": MetadataValue.text(str(chunks_info)),
-            "zarr_preferred_chunks": MetadataValue.text(str(preferred_chunks)),
-            "data_shape": MetadataValue.text(str(storage_verify.lightcurves.shape if storage_verify.lightcurves is not None else 'N/A')),
-            "data_dtype": MetadataValue.text(str(storage_verify.lightcurves.dtype if storage_verify.lightcurves is not None else 'N/A')),
-        }
+            value=str(storage_verify.storage_path),
+            metadata=metadata
     )
-
 
 @asset(
     partitions_def=group_chan_partitions,
-    deps=["idf_lightcurve_storage_empty"],
     ins={
+        "storage_path": AssetIn("idf_lightcurve_storage_empty"),
         "catalog_sci": AssetIn("cat_from_sci"),
         "catalog_clean": AssetIn("cat_from_sci_lac_cleaned"),
     },
@@ -851,6 +848,7 @@ def idf_lightcurve_storage_empty(
 )
 def idf_lightcurve_storage_populated(
     context: AssetExecutionContext,
+    storage_path: str,
     catalog_sci: str,
     catalog_clean: str,
 ) -> MaterializeResult:
@@ -865,70 +863,63 @@ def idf_lightcurve_storage_populated(
     
     After all partitions complete, use finalize_lightcurve_storage to consolidate metadata.
     """
-    
-    config: IDFPipelineConfig = context.resources.idf_pipeline_config
     partition_key = context.partition_key
-    group_name, chan = PartitionKey.get_components(partition_key)
+    group_name, _ = PartitionKey.get_components(partition_key)
+    # use group name as epoch key
+    epoch_key = group_name
 
-    workdir = Path(config.workdir)
-    storage_path = workdir / config.lightcurve_storage_filename
-    
     # Open storage and load existing data
     logger.info(f"Opening storage at {storage_path}")
     storage = LightcurveStorage(
-        storage_path=storage_path,
-        enable_spatial_chunking=True
+        storage_path=Path(storage_path),
     )
-    storage.load_storage()
-    
-    if storage.lightcurves is None:
-        raise RuntimeError("Failed to load lightcurves storage")
-    
-    logger.info(f"Loaded storage with shape: {storage.lightcurves.shape}")
- 
+    lc_var = storage.load_for_per_epoch_write()
+    logger.info(f"Loaded storage with shape: {lc_var.shape}")
     logger.info(f"Populating storage for {partition_key}")
-
-    def _populate(catalog: SourceCatalog):
-        logger.info(f"Populate catalog: {catalog}")
 
     n_populated = 0
     for catalog_file in [catalog_sci, catalog_clean]:
         # Skip if catalog file is empty (upstream failed)
         if not catalog_file:
-            logger.warning(f"No catalog available for {partition_key}")
+            logger.warning(f"missing catalog: {catalog_file}")
             continue
         # Load catalog from file
         catalog_file = Path(catalog_file)
         logger.info(f"Loading catalog from {catalog_file}")
         tbl = Table.read(catalog_file, format='ascii.ecsv')
-        catalog = IDFSourceCatalog(tbl, name=make_table_name(catalog_file))
+        tbl_transform = IDFSExtractorTableTransform(
+            table_key=make_table_key(catalog_file),
+            epoch_key=epoch_key
+        )
+        catalog = SourceCatalog(tbl, table_transform=tbl_transform)
     
         # Use the populate_epoch_from_catalog method which handles region-based writes
         # This method internally uses xarray's region parameter for safe concurrent writes
-        n_populated += storage.populate_epoch_from_catalog(
-            epoch_key=group_name,
-            source_catalog=catalog,
-            measurement_keys=measurement_keys_all
+        n_populated += storage.populate_epoch(
+            catalog,
+            epoch_key=epoch_key,
         )
     
-    logger.info(f"Populated {n_populated} measurements for epoch {group_name}")
+    logger.info(f"Populated {n_populated} measurements for epoch {epoch_key}")
     
     return MaterializeResult(
-        value=n_populated,
+        value=storage_path,
         metadata={
             "partition_key": MetadataValue.text(partition_key),
+            "epoch_key": MetadataValue.text(epoch_key),
             "n_populated": MetadataValue.int(n_populated),
         }
     )
 
 
 @asset(
-    deps=["idf_lightcurve_storage_populated"],
+    ins={"storage_path": AssetIn("idf_lightcurve_storage_populated")},
     description="Finalize lightcurve storage by consolidating Zarr metadata for fast reads",
     required_resource_keys={"idf_pipeline_config"}
 )
 def idf_lightcurve_storage_finalized(
     context: AssetExecutionContext,
+    storage_path: str,
 ) -> MaterializeResult:
     """Consolidate Zarr metadata after all partitioned writes complete.
     
@@ -946,41 +937,20 @@ def idf_lightcurve_storage_finalized(
     4. Analysis code opens with consolidated=True (default) for fast reads
     """
     
-    config: IDFPipelineConfig = context.resources.idf_pipeline_config
-    workdir = Path(config.workdir)
-    storage_path = workdir / config.lightcurve_storage_filename
-    
-    logger.info(f"Consolidating Zarr metadata for {storage_path}")
-    
-    if not storage_path.exists():
-        raise FileNotFoundError(f"Storage path does not exist: {storage_path}")
-    
-    # Consolidate metadata
-    # This creates .zmetadata (Zarr v2) or internal consolidated metadata (Zarr v3)
-    # containing all chunk metadata in a single key for fast reads
-    zarr.consolidate_metadata(str(storage_path))
-    logger.info("✓ Successfully consolidated Zarr metadata")
-    
-    # Verify by loading storage with consolidated metadata
-    storage = LightcurveStorage(storage_path=storage_path)
-    storage.load_storage()  # This uses consolidated=True by default
-    
-    if storage.lightcurves is None:
-        raise RuntimeError("Failed to load storage after consolidation")
-    
-    logger.info(f"✓ Verified storage loads correctly with consolidated metadata")
-    logger.info(f"  • Shape: {storage.lightcurves.shape}")
-    logger.info(f"  • Dtype: {storage.lightcurves.dtype}")
-    logger.info(f"  • Chunks: {storage.lightcurves.encoding.get('chunks', 'N/A')}")
-    
+    logger.info(f"Rechunk and consolidating Zarr metadata for {storage_path}")
+    storage = LightcurveStorage(
+        storage_path=Path(storage_path),
+    )
+    storage.rechunk_for_per_object_read()
+    lc_var = storage.load_for_per_object_read()
+    logger.info(f"Loaded storage: {lc_var}")
+    metadata = {
+        "storage_info": MetadataValue.text(json.dumps(storage.get_storage_info(), indent=2))
+    }
+
     return MaterializeResult(
-        metadata={
-            "storage_path": MetadataValue.path(str(storage_path)),
-            "consolidated": MetadataValue.bool(True),
-            "shape": MetadataValue.text(str(storage.lightcurves.shape)),
-            "dtype": MetadataValue.text(str(storage.lightcurves.dtype)),
-            "chunks": MetadataValue.text(str(storage.lightcurves.encoding.get('chunks', 'N/A'))),
-        }
+        value=storage_path,
+        metadata=metadata,
     )
 
 

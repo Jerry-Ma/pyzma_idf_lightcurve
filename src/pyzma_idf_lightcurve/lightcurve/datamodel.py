@@ -41,8 +41,8 @@ class LightcurveStorage:
     - Support for region-based writes for distributed processing
     """
     storage_path: Path
-    sort_objects_by_position: bool = True
     lightcurves: xr.DataArray | None = dataclasses.field(init=False, default=None)
+    _dataset: xr.Dataset | None = dataclasses.field(init=False, default=None)
     _zarr_path_loaded : Path |None  = dataclasses.field(init=False, default=None)
     _zarr_path_for_write : Path  = dataclasses.field(init=False)
     _zarr_path_for_read : Path  = dataclasses.field(init=False)
@@ -65,14 +65,14 @@ class LightcurveStorage:
     def is_loaded(self):
         return self.lightcurves is not None
 
-    def _validate_dim_args(self, source_catalog, dim_name, dim_keys, dim_vars):
+    def _validate_dim_args(self, source_catalog: SourceCatalog, dim_name: str, dim_keys: list[str] | None, dim_vars: dict[str, np.ndarray]) -> tuple[int, list[str], dict[str, np.ndarray]]:
         if dim_keys is None:
             logger.debug(f"use all {dim_name}_keys from source catalog {source_catalog}")
-            dim_keys = getattr(source_catalog, f"{dim_name}_keys") 
+            dim_keys = list(getattr(source_catalog, f"{dim_name}_keys"))
             if not dim_keys:
                 raise ValueError("no keys specified for {dim_name}")
         n_dim_keys = len(dim_keys)
-        for var in dim_vars:
+        for var in dim_vars.values():
             if len(var) != n_dim_keys:
                 raise ValueError(f"mismatch size between dim_keys ({n_dim_keys}) and dim_var {var} ({len(var)}).")
         return n_dim_keys, dim_keys, dim_vars
@@ -81,11 +81,12 @@ class LightcurveStorage:
         self,
         zarr_path: Path,
         source_catalog: SourceCatalog,
+        consolidated: bool,
         measurement_keys: list[str] | None = None,
         value_keys: list[str] | None = None,
         epoch_keys: list[str] | None = None,
         dim_vars: dict[DimNameT, dict[str, np.ndarray]] | None = None,
-        zarr_chunks: dict[DimNameT, int] | None = None 
+        zarr_chunks: dict[DimNameT, int] | None = None,
     ) -> None:
         """
         Create xarray-based storage with labeled dimensions.
@@ -109,12 +110,6 @@ class LightcurveStorage:
         n_measurements, measurement_keys, measurement_vars = self._validate_dim_args(source_catalog, "measurement", measurement_keys, dim_vars.get("measurement", {}))
         n_values, value_keys, value_vars = self._validate_dim_args(source_catalog, "value", value_keys, dim_vars.get("value", {}))
         n_epochs, epoch_keys, epoch_vars = self._validate_dim_args(source_catalog, "epoch", epoch_keys, dim_vars.get("epoch", {}))
-
-        if self.sort_objects_by_position:
-            source_catalog.sort_objects_by_position()
-            logger.info(f"Using spatial ordering for objects.")
-        else:
-            logger.info(f"Using original ordering for objects")
         object_keys = source_catalog.object_keys
         n_objects = len(object_keys)
         logger.info(f"create storage for: {n_objects=} {n_measurements=} {n_values=} {n_epochs=}")
@@ -129,11 +124,12 @@ class LightcurveStorage:
             "epoch": n_epochs,
         }
         shape = tuple(dim_sizes[dn] for dn in dim_names)
-        
+
         arr_placeholder = da.full(
             shape=shape,
             fill_value=np.nan,
             dtype=np.float32,
+            chunks=-1,
         )
         arr_coords = {
             'object': object_keys,
@@ -162,54 +158,80 @@ class LightcurveStorage:
                 ds[f"{dn}_{name}"] = ((dn, ), array)
 
         # Add coordinate arrays as non-dimension coordinates
-        # TODO change this to make it more concise
+        # These are kept as numpy arrays (not chunked) to avoid chunk alignment issues
         ra_vals, dec_vals, x_vals, y_vals = source_catalog.get_coordinate_arrays_for_objects(object_keys.tolist())
         
+        # Ensure coordinates are plain numpy arrays, not Dask arrays
         lc_var = lc_var.assign_coords(
-            ra=('object', ra_vals),
-            dec=('object', dec_vals),
-            x_image=('object', x_vals),
-            y_image=('object', y_vals)
+            ra=('object', np.asarray(ra_vals)),
+            dec=('object', np.asarray(dec_vals)),
+            x_image=('object', np.asarray(x_vals)),
+            y_image=('object', np.asarray(y_vals))
         )
         # update ds with updated variables
         ds[lc_var_name] = lc_var
+        # update chunk to match specific chunk scheme
+        # _zarr_chunks = tuple(
+        #     zarr_chunks.get(dn, dim_sizes[dn])
+        #     for dn in dim_names
+        # )
+        _zarr_chunks = {
+            dn: zarr_chunks.get(dn, -1)
+            for dn in dim_names
+        }
+        ds = ds.chunk(_zarr_chunks)
 
         # Write to zarr without computing array values (only metadata)
         # This is the key trick from xarray docs - creates the store structure without allocating data
-        _zarr_chunks = tuple(
-            zarr_chunks.get(dn, dim_sizes[dn])
-            for dn in dim_names
-        )
         logger.info(f"Writing zarr metadata: shape={shape}, chunk_shape={_zarr_chunks}")
         encoding = {
-            "compressors": None,
-            "chunks": _zarr_chunks,
+            lc_var_name: {
+                "compressors": None,  # Zarr v3 uses "compressors" (plural)
+            }
         }
-        ds.to_zarr(zarr_path, mode='w', encoding=encoding, compute=False, consolidated=True)
+        ds.to_zarr(zarr_path, mode='w', zarr_format=3, encoding=encoding, compute=False, consolidated=consolidated)
 
     def create_for_per_epoch_write(self, *args, **kwargs):
         # set epoch chunk size to 1 for parallel writing per-epoch.
         zarr_chunks = kwargs.pop("zarr_chunks", {})
         zarr_chunks["epoch"] = 1
         kwargs["zarr_chunks"] = zarr_chunks
+        kwargs["consolidated"] = False
         return self._create(self.zarr_path_for_write, *args, **kwargs)
 
-    def rechunk_for_per_object_read(self, chunk_size=1000):
-        zarr_path_for_write = self.zarr_path_for_write
-        if not zarr_path_for_write.exists():
-            raise RuntimeError(f"Storage for write not created yet.")
-        arr = da.from_zarr(zarr_path_for_write)
-        logger.info(f"storage chunks for write: {arr.chunks}")
+    def rechunk_for_per_object_read(self, chunk_size=1000) -> None:
+        lc_var = self.load_for_per_epoch_write()
+        ds = self._dataset
+        assert ds is not None
+        logger.info(f"storage chunks for write: {lc_var.chunks}")
 
-        chunks_out = list(arr.shape)
-        obj_dim_idx = self.dim_names.index("object")
-        chunks_out[obj_dim_idx] = chunk_size
-        chunks_out = tuple(chunks_out)
-        rechunked = arr.rechunk(chunks_out)
-        logger.info(f"rechunked storage chunks for read: {rechunked.chunks}")
-        arr.to_zarr(self.zarr_path_for_read, overwrite=True)
+        # Build the chunking dict for xarray's rechunk
+        chunks_dict = {dim: -1 for dim in self.dim_names}  # -1 means full dimension
+        chunks_dict["object"] = chunk_size
+        chunks_dict["epoch"] = -1  # All epochs in one chunk for per-object read
+        
+        logger.info(f"current storage chunks: {ds.chunks}")
+        rechunked_ds = ds.chunk(chunks_dict)
+        logger.info(f"rechunked storage chunks for read: {rechunked_ds[self.lc_var_name].chunks}")
 
-    def _load(self, zarr_path, consolidated: bool = True):
+        # this clears all built-in encodings to make sure the new chunks is used when saving.
+        def clear_encoding(ds):
+            for v in ds.variables.keys():
+                ds[v].encoding.clear()
+        clear_encoding(rechunked_ds)
+
+        rechunked_ds.to_zarr(
+            self.zarr_path_for_read, 
+            mode='w', 
+            consolidated=True, 
+            encoding={
+                self.lc_var_name: {
+                    "compressors": None
+                }
+            }
+        )
+
+    def _load(self, zarr_path, consolidated: bool) -> xr.DataArray:
         """Load existing xarray storage from zarr.
         
         Uses xr.open_zarr() which is the recommended way to open Zarr stores.
@@ -226,8 +248,11 @@ class LightcurveStorage:
         if not zarr_path.exists():
             raise RuntimeError(f"Storage not created yet: {zarr_path}")
         
-        ds = xr.open_zarr(zarr_path, consolidated=consolidated)
-        lc_var = self.lightcurves = ds['lightcurves']
+        # Use chunks={} to preserve native Zarr chunks without Dask rechunking
+        # Empty dict tells xarray to use Zarr's native chunks for all variables
+        # This prevents automatic Dask chunking that can cause alignment issues with large arrays
+        ds = self._dataset = xr.open_zarr(zarr_path, consolidated=consolidated, chunks={})  # type: ignore[arg-type]
+        lc_var = self.lightcurves = ds[self.lc_var_name]
         logger.info(f"Loaded lightcurve storage from {zarr_path}")
         self._zarr_path_loaded = zarr_path
         return lc_var
@@ -289,14 +314,15 @@ class LightcurveStorage:
             )
         for i, mk in enumerate(data_measurement_keys):
             for j, vk in enumerate(data_value_keys):
-                if not cat_epoch_keys:
-                    # use the data as epoch_key if cat is not epoch-aware
-                    ek = None
-                else:
-                    ek = epoch_key
-                data_packed[i, j, 1] = data[SourceCatalogDataKey(measurement=mk, value=vk, epoch=ek)]
-        # check there is no None in it
-        if None in data_packed:
+                for k, ek in enumerate(data_epoch_keys):
+                    if not cat_epoch_keys:
+                        # use the data as epoch_key if cat is not epoch-aware
+                        ek = None
+                    else:
+                        assert ek == epoch_key
+                    data_packed[i, j, k] = data[SourceCatalogDataKey(measurement=mk, value=vk, epoch=ek)]
+        # check there is no None in it (use element-wise comparison for object arrays)
+        if np.any([x is None for x in data_packed.ravel()]):
             raise ValueError(f"cannot pack catalog data into oindex format: {source_catalog}")
         data_packed = np.array(data_packed.tolist())
 
@@ -416,16 +442,18 @@ class LightcurveStorage:
         ra_mask = (self.lightcurves.ra >= ra_range[0]) & (self.lightcurves.ra <= ra_range[1])
         dec_mask = (self.lightcurves.dec >= dec_range[0]) & (self.lightcurves.dec <= dec_range[1])
         
-        # Combine masks and get object keys
+        # Combine masks and compute before indexing (xarray doesn't support dask boolean indexing)
         # .where() with drop=True efficiently filters coordinates
-        region_mask = ra_mask & dec_mask
+        region_mask = (ra_mask & dec_mask).compute()
         object_keys = self.lightcurves.object.where(region_mask, drop=True)
         
         return object_keys.values.tolist()
 
-    def get_storage_info(self, which: Literal["read", "write"]) -> dict[str, Any]:
+    def get_storage_info(self, which: Literal["read", "write", "current"] = "current") -> dict[str, Any]:
         """Get comprehensive storage information using xarray metadata."""
-        if self.lightcurves is None:
+        if not self.is_loaded():
+            if which == "current":
+                return {"status": "not_loaded", "storage_path": str(self.storage_path)}
             try:
                 if which == "read":
                     self.load_for_per_object_read()
@@ -435,13 +463,19 @@ class LightcurveStorage:
                     assert False
             except RuntimeError:
                 return {"status": "not_created", "storage_path": str(self.storage_path)}
-        
+        else:
+            if which != "current":
+                # close and call this function again
+                self.close()
+                return self.get_storage_info(which=which)
+            # loaded with current
         assert self.lightcurves is not None, "Failed to load lightcurves storage"
         info = {
             "status": "ready",
             "storage_path": str(self.storage_path),
             "zarr_path": str(self._zarr_path_loaded),
             "data_shape": dict(self.lightcurves.sizes),
+            "chunks": [c[0] for c in self.lightcurves.chunks or []],
             "dimensions": list(self.lightcurves.dims),
             "coordinates": list(self.lightcurves.coords.keys()),
             "measurement_keys": self.lightcurves.measurement.values.tolist(),
@@ -469,22 +503,6 @@ class LightcurveStorage:
         
         return info
 
-
-
     def append_epoch_data(self, epoch_key: str, catalog: Table, measurement_keys: list[str]) -> int:
         """Append data for a new epoch to existing zarr storage using region writes."""
-        if self.lightcurves is None:
-            self.load_storage()
-        assert self.lightcurves is not None, "Failed to load lightcurves storage"
-        
-        # Check if epoch already exists
-        if epoch_key in self.lightcurves.epoch_key.values:
-            logger.warning(f"Epoch {epoch_key} already exists, overwriting")
-            source_catalog = SourceCatalog(catalog)
-            return self.populate_epoch_from_catalog(epoch_key, source_catalog, measurement_keys)
-        
-        # For appending new epochs, we would need to extend the array along the epoch_key dimension
-        # This is a placeholder for future implementation using append_dim
-        print(f"Note: append_epoch_data not fully implemented. Use populate_epoch_from_catalog for existing epochs.")
-        return 0
-
+        return NotImplemented

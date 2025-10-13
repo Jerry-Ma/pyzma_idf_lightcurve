@@ -562,6 +562,101 @@ class TestCustomTransform:
         assert "magerr" in catalog.value_keys
 
 
+class TestSortObjectsByPosition:
+    """Test sort_objects_by_position functionality."""
+    
+    def test_sort_objects_by_position_basic(self):
+        """Test that sort_objects_by_position correctly reorders the internal table."""
+        # Create a test catalog with unsorted spatial positions
+        test_table = Table()
+        test_table['ra'] = [100.5, 100.1, 100.9, 100.2, 100.7]
+        test_table['dec'] = [20.5, 20.1, 20.9, 20.2, 20.7]
+        test_table['x'] = [50.0, 10.0, 90.0, 20.0, 70.0]
+        test_table['y'] = [50.0, 10.0, 90.0, 20.0, 70.0]
+        test_table['id'] = ['obj_a', 'obj_b', 'obj_c', 'obj_d', 'obj_e']
+        test_table['flux_auto'] = [100.0, 200.0, 300.0, 400.0, 500.0]
+        
+        # Create catalog
+        catalog = SourceCatalog(test_table, copy=True)
+        
+        # Store original order
+        original_ids = list(catalog.object_keys)
+        original_ra = list(catalog.ra_values)
+        
+        # Sort by position
+        catalog.sort_objects_by_position(grid_divisions=10)
+        
+        # Verify that table was updated
+        sorted_ids = list(catalog.object_keys)
+        sorted_ra = list(catalog.ra_values)
+        
+        # Verify the spatial sort key column exists and is sorted
+        assert "_source_catalog_spatial_sort_key" in catalog.table.colnames
+        sort_keys = list(catalog.table["_source_catalog_spatial_sort_key"])
+        assert sort_keys == sorted(sort_keys), "Sort keys should be in ascending order"
+        
+        # Verify that all properties are consistent with the new table order
+        for i in range(len(catalog)):
+            assert catalog.object_keys[i] == catalog.table['id'][i]
+            assert catalog.ra_values[i] == catalog.table['ra'][i]
+            assert catalog.dec_values[i] == catalog.table['dec'][i]
+        
+        # Verify that data access through properties matches table directly
+        assert list(catalog.object_keys) == list(catalog.table['id'])
+    
+    def test_sort_preserves_data_integrity(self):
+        """Test that sorting preserves all data columns correctly."""
+        test_table = Table()
+        test_table['id'] = [1, 2, 3, 4, 5]
+        test_table['ra'] = [100.5, 100.1, 100.9, 100.2, 100.7]
+        test_table['dec'] = [20.5, 20.1, 20.9, 20.2, 20.7]
+        test_table['x'] = [50.0, 10.0, 90.0, 20.0, 70.0]
+        test_table['y'] = [50.0, 10.0, 90.0, 20.0, 70.0]
+        test_table['mag_auto'] = [18.0, 18.1, 18.2, 18.3, 18.4]
+        test_table['flux_auto'] = [100.0, 200.0, 300.0, 400.0, 500.0]
+        
+        catalog = SourceCatalog(test_table, copy=True)
+        
+        # Create mapping of id to mag before sorting
+        id_to_mag = {str(catalog.table['id'][i]): catalog.table['mag_auto'][i] 
+                     for i in range(len(catalog))}
+        
+        # Sort
+        catalog.sort_objects_by_position(grid_divisions=10)
+        
+        # Verify that each id still maps to the same mag value
+        for i in range(len(catalog)):
+            obj_id = catalog.object_keys[i]
+            expected_mag = id_to_mag[obj_id]
+            actual_mag = catalog.table['mag_auto'][i]
+            assert actual_mag == expected_mag, f"Data integrity lost for object {obj_id}"
+    
+    def test_sort_with_different_grid_divisions(self):
+        """Test sorting with different grid division values."""
+        test_table = Table()
+        test_table['id'] = list(range(1, 21))
+        test_table['ra'] = np.random.RandomState(42).uniform(100.0, 101.0, 20)
+        test_table['dec'] = np.random.RandomState(42).uniform(20.0, 21.0, 20)
+        test_table['x'] = np.random.RandomState(42).uniform(0, 1000, 20)
+        test_table['y'] = np.random.RandomState(42).uniform(0, 1000, 20)
+        
+        # Test with grid_divisions=5
+        catalog1 = SourceCatalog(test_table.copy(), copy=True)
+        catalog1.sort_objects_by_position(grid_divisions=5)
+        assert "_source_catalog_spatial_sort_key" in catalog1.table.colnames
+        sort_keys1 = list(catalog1.table["_source_catalog_spatial_sort_key"])
+        assert sort_keys1 == sorted(sort_keys1)
+        
+        # Test with grid_divisions=20
+        catalog2 = SourceCatalog(test_table.copy(), copy=True)
+        catalog2.sort_objects_by_position(grid_divisions=20)
+        sort_keys2 = list(catalog2.table["_source_catalog_spatial_sort_key"])
+        assert sort_keys2 == sorted(sort_keys2)
+        
+        # The ordering may differ between different grid divisions
+        # but both should be valid sorted orders
+
+
 class TestEdgeCases:
     """Test edge cases and error conditions."""
     
