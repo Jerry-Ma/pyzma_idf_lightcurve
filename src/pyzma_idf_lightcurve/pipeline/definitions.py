@@ -3,14 +3,14 @@ Main Dagster definitions for the IDF lightcurve processing pipeline.
 """
 
 import os
-from dagster import Config, ConfigurableResource, Definitions
+
 import yaml
-from pathlib import Path
+from dagster import Config, ConfigurableResource, Definitions
 from loguru import logger
 
 from .assets import asset_defs
-from .io_managers import duckdb_json_io_manager
 from .config import IDFPipelineConfig
+from .io_managers import duckdb_json_io_manager
 
 
 def _load_defs() -> Definitions:

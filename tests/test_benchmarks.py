@@ -18,16 +18,16 @@ Run benchmarks:
     uv run pytest tests/test_benchmarks.py --benchmark-compare-fail=mean:10%
 """
 
-import pytest
-import numpy as np
 import shutil
 import tempfile
 from pathlib import Path
+
+import numpy as np
+import pytest
 from astropy.table import Table
 
-from pyzma_idf_lightcurve.lightcurve.datamodel import LightcurveStorage
 from pyzma_idf_lightcurve.lightcurve.catalog import SourceCatalog
-
+from pyzma_idf_lightcurve.lightcurve.datamodel import LightcurveStorage
 
 # ============================================================================
 # FIXTURES - Large Dataset Creation

@@ -10,19 +10,17 @@ Uses xarray DataArray with labeled dimensions for intuitive access:
 Eliminates spatial chunking complexity and enables efficient vectorized updates.
 """
 
+import dataclasses
+from pathlib import Path
+from typing import Any, ClassVar, Literal
+
 import numpy as np
 import xarray as xr
 import zarr
-import dask.array as da
-from pathlib import Path
-from typing import Any, cast, TypedDict, Literal, ClassVar
 from astropy.table import Table
-import re
-from datetime import datetime
 from loguru import logger
-from ..utils.naming import NameTemplate
+
 from .catalog import SourceCatalog, SourceCatalogDataKey
-import dataclasses
 
 __all__ = ['LightcurveStorage']
 
@@ -299,9 +297,11 @@ class LightcurveStorage:
         data_value_keys = list(cat_value_keys.intersection(lc_value_keys))
         data_epoch_keys = list({epoch_key}.intersection(lc_epoch_keys))
         data_shape = (len(data_measurement_keys), len(data_value_keys), len(data_epoch_keys))
+        logger.debug(f"Data shape for update: {data_shape}")
+        logger.debug(f"{data_measurement_keys=}, {data_value_keys=}, {data_epoch_keys=}")
 
         if 0 in data_shape:
-            logger.error("no matching data in storage for update: {lc_var}")
+            logger.error(f"No matching data in storage for update: {lc_var}")
             return 0
 
         data = source_catalog.data
@@ -320,10 +320,20 @@ class LightcurveStorage:
                         ek = None
                     else:
                         assert ek == epoch_key
-                    data_packed[i, j, k] = data[SourceCatalogDataKey(measurement=mk, value=vk, epoch=ek)]
+                    dk = SourceCatalogDataKey(measurement=mk, value=vk, epoch=ek)
+                    if dk in data:
+                        data_packed[i, j, k] = data[dk]
         # check there is no None in it (use element-wise comparison for object arrays)
-        if np.any([x is None for x in data_packed.ravel()]):
-            raise ValueError(f"cannot pack catalog data into oindex format: {source_catalog}")
+        # remove any measurment that does have None in any of the values
+        measurement_missing = np.zeros((data_packed.shape[0], ), dtype=bool)
+        for i in range(data_packed.shape[0]):
+            measurement_missing[i] = np.any([x is None for x in data_packed[i].ravel()])
+        logger.debug(f"Measurement mask for None values: {measurement_missing}")
+        data_measurement_keys = [mk for i, mk in enumerate(data_measurement_keys) if not measurement_missing[i]]
+        data_packed = data_packed[~measurement_missing, :, :]
+        logger.debug(f"Filtered data_measurement_keys: {data_measurement_keys}")
+        logger.debug(f"filtered data_packed shape: {data_packed.shape}")
+
         data_packed = np.array(data_packed.tolist())
 
         # use a helper function to build index from labels

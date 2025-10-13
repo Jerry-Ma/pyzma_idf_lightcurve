@@ -7,9 +7,8 @@ structured names using template patterns with full type safety.
 
 import re
 from pathlib import Path
-
-from typing import TypeVar, Generic, get_args, Any, TypedDict, ClassVar
 from types import UnionType
+from typing import Any, ClassVar, Generic, TypedDict, TypeVar, get_args
 
 # Generic type variable for the key type - no bound since TypedDict isn't assignable to dict
 NameKeyT = TypeVar('NameKeyT')

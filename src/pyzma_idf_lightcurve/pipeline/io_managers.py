@@ -6,11 +6,11 @@ Integrates with the official dagster-duckdb architecture while supporting JSON s
 import json
 import typing
 from collections.abc import Sequence
-from typing import Optional, Any, Dict, Union, Sequence
+from typing import Any, Sequence
 
-from dagster import InputContext, OutputContext, MetadataValue, io_manager
-from dagster._core.storage.db_io_manager import DbTypeHandler, TableSlice, DbIOManager
-from dagster_duckdb.io_manager import DuckDBIOManager, DuckDbClient
+from dagster import InputContext, MetadataValue, OutputContext, io_manager
+from dagster._core.storage.db_io_manager import DbIOManager, DbTypeHandler, TableSlice
+from dagster_duckdb.io_manager import DuckDbClient, DuckDBIOManager
 from loguru import logger
 
 _PARTITION_EXPR = "partition_key"

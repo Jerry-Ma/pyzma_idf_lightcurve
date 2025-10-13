@@ -2,18 +2,14 @@
 Main Plotly Dash application for interactive lightcurve visualization.
 """
 
-import plotly.graph_objects as go
-import plotly.express as px
-from plotly.subplots import make_subplots
-import dash
-from dash import dcc, html, Input, Output, callback, dash_table
-import pandas as pd
-import numpy as np
-from typing import List, Optional, Dict, Any
-from pathlib import Path
 
-from ..data import LightcurveDatabase, LightcurveQueryEngine
+import dash
+import numpy as np
+import plotly.graph_objects as go
+from dash import Input, Output, dash_table, dcc, html
+
 from ..binary import BinaryLightcurveDatabase
+from ..data import LightcurveDatabase, LightcurveQueryEngine
 
 
 class LightcurveVisualizationApp:

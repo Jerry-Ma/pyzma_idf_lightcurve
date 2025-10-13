@@ -6,18 +6,22 @@ Tests the xarray-based storage functionality with epoch and object_key terminolo
 Uses the new API: create_for_per_epoch_write(), populate_epoch(), load_for_per_object_read(), etc.
 """
 
-import pytest
-import numpy as np
 import shutil
 import tempfile
-from pathlib import Path
-from typing import Any
 import warnings
+from pathlib import Path
+
+import numpy as np
+import pytest
 from astropy.table import Table
+
+from pyzma_idf_lightcurve.lightcurve.catalog import (
+    SExtractorTableTransform,
+    SourceCatalog,
+)
 
 # Import the main components
 from pyzma_idf_lightcurve.lightcurve.datamodel import LightcurveStorage
-from pyzma_idf_lightcurve.lightcurve.catalog import SourceCatalog, SExtractorTableTransform
 
 
 @pytest.fixture
@@ -103,17 +107,7 @@ class TestLightcurveStorage:
         storage = LightcurveStorage(storage_path)
         
         assert storage.storage_path == storage_path
-        assert storage.sort_objects_by_position is True  # Default sorting behavior
-        assert storage.lightcurves is None
-        assert not storage.is_loaded()
-    
-    def test_init_custom_sort(self, temp_dir):
-        """Test LightcurveStorage initialization with custom sort parameter."""
-        storage_path = temp_dir / "test_storage"
-        storage = LightcurveStorage(storage_path, sort_objects_by_position=False)
-        
-        assert storage.storage_path == storage_path
-        assert storage.sort_objects_by_position is False
+        # Note: sort_objects_by_position was removed from API
         assert storage.lightcurves is None
         assert not storage.is_loaded()
     
@@ -205,22 +199,6 @@ class TestLightcurveStorage:
         assert len(storage.lightcurves.value) == 1
     
     # test_create_with_dim_vars and test_create_custom_chunks removed - API not yet implemented
-    
-    def test_create_sorted_objects(self, temp_dir, source_catalog, epoch_keys):
-        """Test spatial sorting of objects during creation."""
-        storage_path = temp_dir / "test_sorted"
-        storage = LightcurveStorage(storage_path, sort_objects_by_position=True)
-        
-        storage.create_for_per_epoch_write(
-            source_catalog=source_catalog,
-            epoch_keys=epoch_keys,
-        )
-        
-        storage.load_for_per_epoch_write()
-        assert storage.lightcurves is not None
-        
-        # Objects should be sorted (can't easily verify z-order, just check it worked)
-        assert len(storage.lightcurves.object) == len(source_catalog.object_keys)
     
     # test_validate_dim_args removed - epoch_vars not yet implemented in API
     
@@ -572,24 +550,6 @@ class TestLightcurveStorage:
             assert epoch_data_filtered.dims == ('object', 'value')
 
 
-    def test_sort_objects_disabled(self, temp_dir, source_catalog, epoch_keys):
-        """Test storage creation without spatial sorting."""
-        storage_path = temp_dir / "test_no_sort"
-        storage = LightcurveStorage(storage_path, sort_objects_by_position=False)
-        
-        assert storage.sort_objects_by_position is False
-        
-        storage.create_for_per_epoch_write(
-            source_catalog=source_catalog,
-            epoch_keys=epoch_keys,
-        )
-        storage.load_for_per_epoch_write()
-        
-        assert storage.lightcurves is not None
-        # Object keys should maintain catalog order without sorting
-        assert len(storage.lightcurves.object) == len(source_catalog.object_keys)
-
-
     def test_storage_persistence(self, temp_dir, source_catalog, epoch_keys):
         """Test that storage persists after closing and can be reloaded."""
         storage_path = temp_dir / "test_persistence"
@@ -721,7 +681,9 @@ class TestErrorHandling:
         storage.load_for_per_epoch_write()
         
         # Check chunks in write storage
+        assert storage.lightcurves is not None
         write_chunks = storage.lightcurves.chunks
+        assert write_chunks is not None
         n_objects = len(storage.lightcurves.object)
         n_epochs = len(storage.lightcurves.epoch)
         
@@ -741,7 +703,9 @@ class TestErrorHandling:
         storage.load_for_per_object_read()
         
         # Check chunks in read storage
+        assert storage.lightcurves is not None
         read_chunks = storage.lightcurves.chunks
+        assert read_chunks is not None
         
         # Read-optimized: should be chunked along object dimension
         # With 100 objects and chunk_size=50, expect 2 chunks of size 50

@@ -9,11 +9,12 @@ This demonstrates:
 Run with: python scripts/test_rechunking_concept.py
 """
 
+import shutil
+from pathlib import Path
+
+import dask.array as da
 import numpy as np
 import zarr
-from pathlib import Path
-import shutil
-import dask.array as da
 
 # Create test data directory
 test_dir = Path("scratch_rechunking_test")

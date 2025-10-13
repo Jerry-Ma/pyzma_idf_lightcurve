@@ -5,9 +5,9 @@ Types and constants.
 
 import re
 from pathlib import Path
-from typing import Literal, TypedDict, get_args
-from .utils.naming import NameTemplate, make_regex_stub_from_literal
+from typing import Literal, TypedDict
 
+from .utils.naming import NameTemplate, make_regex_stub_from_literal
 
 GroupNameT = str
 ChanT = Literal["ch1", "ch2"]
@@ -29,10 +29,10 @@ class IDFFilename(NameTemplate[IDFFilenameT]):
     template = "IDF_{group_name}_{chan}_{kind}{suffix}{fileext}"
     pattern = re.compile(
         rf"^IDF_(?P<group_name>gr\d+)"
-        rf"_{make_regex_stub_from_literal("chan", ChanT)}"
-        rf"_{make_regex_stub_from_literal("kind", ImageKindT)}"
+        rf"_{make_regex_stub_from_literal('chan', ChanT)}"
+        rf"_{make_regex_stub_from_literal('kind', ImageKindT)}"
         rf"(?P<suffix>_[^.]+|)"
-        rf"{make_regex_stub_from_literal("fileext", FileExtT)}"
+        rf"{make_regex_stub_from_literal('fileext', FileExtT)}"
         )
     
     @classmethod

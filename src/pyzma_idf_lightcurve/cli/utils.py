@@ -1,7 +1,9 @@
-from rich.console import Console
-import typer
-from rich.panel import Panel
 import dataclasses
+
+import typer
+from rich.console import Console
+from rich.panel import Panel
+
 
 @dataclasses.dataclass
 class TyperCLI:

@@ -2,46 +2,36 @@
 Core asset definitions for the IDF lightcurve processing pipeline.
 """
 
+import dataclasses
 import json
 import re
-import subprocess
 from pathlib import Path
-from typing import Literal, TypeVar, Generic, TypedDict, get_args
-import multiprocessing
-from functools import cached_property
-from astropy.time import Time
+from typing import TypedDict, get_args
 
-from loguru import logger
 import numpy as np
-import zarr
-from astropy.table import Table, vstack
-
+from astropy.table import Table
+from astropy.time import Time
 from dagster import (
-    asset,
     AssetExecutionContext,
     AssetIn,
-    AssetKey,
-    Config,
-    Definitions,
+    DynamicPartitionsDefinition,
     MaterializeResult,
     MetadataValue,
-    DynamicPartitionsDefinition,
-    DefaultSensorStatus,
-    sensor,
-    SensorEvaluationContext,
-    SensorResult,
-    RunRequest,
-    multiprocess_executor,
-    define_asset_job,
+    asset,
 )
+from loguru import logger
 
-from ..utils.naming import NameTemplate, make_regex_stub_from_literal
-from ..types import ChanT, GroupNameT, IDFFilename
-from ..lightcurve.catalog import SourceCatalog, MeasurementKey, SExtractorTableTransform, TableColumnMapperT, SourceCatalogDataKey
+from ..lightcurve.catalog import (
+    SExtractorTableTransform,
+    SourceCatalog,
+    SourceCatalogDataKey,
+    TableColumnMapperT,
+)
 from ..lightcurve.datamodel import LightcurveStorage
+from ..types import ChanT, GroupNameT, IDFFilename
+from ..utils.naming import NameTemplate, make_regex_stub_from_literal
 from .config import IDFPipelineConfig
 from .utils import check_files_and_timestamps, run_subprocess_command
-import dataclasses
 
 
 class PartitionKeyT(TypedDict):
@@ -892,6 +882,10 @@ def idf_lightcurve_storage_populated(
             epoch_key=epoch_key
         )
         catalog = SourceCatalog(tbl, table_transform=tbl_transform)
+        logger.debug(f"catalog measurement keys: {catalog.measurement_keys}")
+        logger.debug(f"catalog value keys: {catalog.value_keys}")
+        logger.debug(f"catalog epoch keys: {catalog.epoch_keys}")
+        logger.debug(f"catalog data key map: {catalog.data_key_info.colname_data_keys}")
     
         # Use the populate_epoch_from_catalog method which handles region-based writes
         # This method internally uses xarray's region parameter for safe concurrent writes

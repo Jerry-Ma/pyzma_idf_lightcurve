@@ -6,18 +6,21 @@ SExtractor catalog tables, including coordinate handling, column mapping,
 and spatial sorting for efficient storage access patterns.
 """
 
-import re
-from duckdb import table
-from loguru import logger
-import numpy as np
-from astropy.table import Table, Column
-from pathlib import Path
-from typing import TypedDict, ClassVar, Literal, get_args, cast, Callable, NamedTuple
-from ..utils.naming import NameTemplate, make_regex_stub_from_literal, StrSepNameTemplate, DashSeparated, UnderscoreSeparated, StrSepSegment
-from ..types import ChanT, ImageKindT, ImageSuffixT, IDFFilenameT, IDFFilename
-from functools import cached_property
 import dataclasses
+import re
+from functools import cached_property
+from typing import Callable, NamedTuple, cast
 
+import numpy as np
+from astropy.table import Column, Table
+from loguru import logger
+
+from ..utils.naming import (
+    DashSeparated,
+    StrSepNameTemplate,
+    StrSepSegment,
+    UnderscoreSeparated,
+)
 
 # ValueKeyT = Literal["value", "uncertainty", "mag", "mag_err", "flux", "flux_err"]
 

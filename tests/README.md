@@ -12,7 +12,7 @@ Tests for the `SourceCatalog` class:
 - Coordinate handling and dictionary generation
 - Valid measurement masking
 
-### `test_datamodel.py` (11 tests)
+### `test_datamodel.py` (39 tests)
 Tests for the `LightcurveStorage` class:
 - Storage initialization and creation
 - Zarr backend configuration
@@ -21,12 +21,23 @@ Tests for the `LightcurveStorage` class:
 - Epoch data retrieval
 - Storage metadata and info
 - Spatial region queries
-- Integration workflows
+- Data persistence across reloads
+- Error handling for invalid operations
+- Integration workflows and edge cases
+
+### `test_benchmarks.py`
+Performance benchmarks comparing different implementations.
+
+### `test_concurrent_writing.py`
+Tests for concurrent epoch writing capabilities.
+
+### `test_naming.py`
+Tests for catalog naming and identification.
 
 ## Running Tests
 
 ```bash
-# All tests (32 tests, ~1.3s)
+# All tests
 uv run pytest tests/
 
 # Specific module
@@ -42,9 +53,20 @@ uv run ptw tests/
 
 ## Test Coverage
 
-- **Catalog Module:** 100%
-- **Datamodel Module:** 100%
-- **Overall:** 32/32 tests passing
+Current test suite includes:
+- **test_catalog.py**: SourceCatalog functionality
+- **test_datamodel.py**: LightcurveStorage functionality (39 tests)
+- **test_benchmarks.py**: Performance comparisons
+- **test_concurrent_writing.py**: Concurrent operations
+- **test_naming.py**: Naming conventions
+
+## Removed Test Files
+
+The following test files have been removed as they tested obsolete API:
+- `test_populate_correctness.py`: Tested versioned populate methods (v0/v1/v2) that no longer exist
+- `test_zarr_storage.py`: Tested old storage API that has been replaced
+
+The functionality they tested is now covered by `test_datamodel.py` with the current API.
 
 ## Key Testing Patterns
 

@@ -2,11 +2,10 @@
 Reusable components for the lightcurve visualization interface.
 """
 
-import plotly.graph_objects as go
-import plotly.express as px
-from plotly.subplots import make_subplots
+
 import numpy as np
-from typing import List, Optional, Dict, Any
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 
 def create_lightcurve_plot(
@@ -14,7 +13,7 @@ def create_lightcurve_plot(
     magnitudes: np.ndarray,
     mag_errors: np.ndarray,
     title: str = "Lightcurve",
-    flags: | None]np.ndarray] = None
+    flags: np.ndarray | None = None
 ) -> go.Figure:
     """
     Create a standard lightcurve plot.

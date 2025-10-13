@@ -5,7 +5,6 @@ Utility functions for the IDF lightcurve processing pipeline.
 import subprocess
 from pathlib import Path
 
-
 from dagster import AssetExecutionContext
 
 

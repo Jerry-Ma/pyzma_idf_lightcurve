@@ -4,12 +4,13 @@
 Tests both methods with timing to determine which is better for our use case.
 """
 
-import numpy as np
-import zarr
-from pathlib import Path
 import shutil
 import time
+from pathlib import Path
+
 import dask.array as da
+import numpy as np
+import zarr
 
 # Create test data directory
 test_dir = Path("scratch_rechunking_comparison")

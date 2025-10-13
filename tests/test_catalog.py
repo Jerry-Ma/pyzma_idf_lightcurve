@@ -10,19 +10,21 @@ Tests the new customizable catalog transformation system including:
 - Data extraction and validation
 """
 
-import pytest
-import numpy as np
-from astropy.table import Table
-import re
 import dataclasses
+import re
+
+import numpy as np
+import pytest
+from astropy.table import Table
 
 from pyzma_idf_lightcurve.lightcurve.catalog import (
-    SourceCatalog,
-    SourceCatalogTableTransform,
-    SExtractorTableTransform,
-    SourceCatalogDataKey,
-    MeasurementKey,
     MeasurementColname,
+    MeasurementKey,
+    SExtractorTableTransform,
+    SourceCatalog,
+    SourceCatalogDataKey,
+    SourceCatalogTableTransform,
+    TableColumnMapperT,
     default_source_catalog_table_transform,
 )
 
@@ -188,6 +190,7 @@ class TestSExtractorTableTransform:
     def test_sextractor_obj_key(self):
         """Test SExtractor object key transformation."""
         transform = SExtractorTableTransform()
+        assert isinstance(transform.obj_key_col, tuple)
         col_name, mapper_func = transform.obj_key_col
         assert col_name == "NUMBER"
         test_arr = np.array([1001, 1002, 1003])
@@ -367,26 +370,41 @@ class TestMeasurementKeyInference:
 class TestMeasurementExtraction:
     """Test extracting measurements from catalog."""
     
-    def test_extract_measurements_default(self):
-        """Test extracting measurements with default transform."""
+    def test_data_property_structure(self):
+        """Test that data property returns correct structure."""
         tbl = Table()
-        tbl['id'] = [1, 2, 3]
-        tbl['ra'] = [10.0, 10.1, 10.2]
-        tbl['dec'] = [20.0, 20.1, 20.2]
-        tbl['x'] = [100.0, 200.0, 300.0]
-        tbl['y'] = [150.0, 250.0, 350.0]
-        tbl['mag_auto'] = np.array([18.0, 18.5, 19.0])
-        tbl['magerr_auto'] = np.array([0.05, 0.06, 0.07])
+        tbl['NUMBER'] = [1, 2, 3]
+        tbl['ALPHA_J2000'] = [10.0, 10.1, 10.2]
+        tbl['DELTA_J2000'] = [20.0, 20.1, 20.2]
+        tbl['X_IMAGE'] = [100.0, 200.0, 300.0]
+        tbl['Y_IMAGE'] = [150.0, 250.0, 350.0]
+        tbl['MAG_AUTO'] = np.array([18.0, 18.5, 19.0])
+        tbl['MAGERR_AUTO'] = np.array([0.05, 0.06, 0.07])
         
-        catalog = SourceCatalog(tbl)
-        measurements = catalog.extract_measurements(["auto"])
+        transform = SExtractorTableTransform()
+        catalog = SourceCatalog(tbl, table_transform=transform)
         
-        assert "auto" in measurements
-        # Note: extract_measurements returns dict[measurement, array]
-        # The actual structure may vary based on implementation
+        data = catalog.data
         
-    def test_extract_multiple_measurements(self):
-        """Test extracting multiple measurement types."""
+        # Should be a dict with SourceCatalogDataKey as keys
+        assert isinstance(data, dict)
+        assert len(data) > 0
+        
+        # All keys should be SourceCatalogDataKey tuples
+        for key in data.keys():
+            assert isinstance(key, tuple)
+            assert len(key) == 3  # measurement, value, epoch
+            assert isinstance(key[0], str)  # measurement
+            assert isinstance(key[1], str)  # value
+            assert key[2] is None or isinstance(key[2], str)  # epoch
+        
+        # All values should be numpy arrays
+        for value in data.values():
+            assert isinstance(value, np.ndarray)
+            assert len(value) == 3  # Same length as table
+    
+    def test_data_property_content(self):
+        """Test that data property contains correct content."""
         tbl = Table()
         tbl['NUMBER'] = [1, 2]
         tbl['ALPHA_J2000'] = [10.0, 10.1]
@@ -401,50 +419,34 @@ class TestMeasurementExtraction:
         transform = SExtractorTableTransform()
         catalog = SourceCatalog(tbl, table_transform=transform)
         
-        measurements = catalog.extract_measurements(["auto", "iso"])
+        data = catalog.data
         
-        assert "auto" in measurements
-        assert "iso" in measurements
-
-
-class TestSpatialOrdering:
-    """Test spatial ordering functionality."""
-    
-    def test_spatial_ordering_basic(self):
-        """Test basic spatial ordering."""
-        n_obj = 20
-        np.random.seed(42)
-        tbl = Table()
-        tbl['id'] = list(range(1, n_obj + 1))
-        tbl['ra'] = np.random.uniform(10.0, 11.0, n_obj)
-        tbl['dec'] = np.random.uniform(20.0, 21.0, n_obj)
-        tbl['x'] = np.random.uniform(0, 1000, n_obj)
-        tbl['y'] = np.random.uniform(0, 1000, n_obj)
+        # Check that expected keys are present
+        measurements = {key[0] for key in data.keys()}
+        assert 'auto' in measurements
+        assert 'iso' in measurements
         
-        catalog = SourceCatalog(tbl)
+        values = {key[1] for key in data.keys()}
+        assert 'mag' in values
+        assert 'magerr' in values
+        assert 'flux' in values
+        assert 'fluxerr' in values
         
-        ordered_keys = catalog.get_spatially_ordered_keys(grid_divisions=5)
+        # Check actual data values for MAG_AUTO
+        from pyzma_idf_lightcurve.lightcurve.catalog import SourceCatalogDataKey
+        mag_auto_key = SourceCatalogDataKey(measurement='auto', value='mag', epoch=None)
+        assert mag_auto_key in data
+        np.testing.assert_array_equal(data[mag_auto_key], np.array([18.0, 18.5]))
         
-        assert len(ordered_keys) == n_obj
-        # Object keys are strings
-        assert set(ordered_keys) == set(str(i) for i in range(1, n_obj + 1))
-    
-    def test_spatial_ordering_with_nan(self):
-        """Test spatial ordering handles NaN coordinates."""
-        tbl = Table()
-        tbl['id'] = [1, 2, 3, 4]
-        tbl['ra'] = [10.0, 10.1, np.nan, 10.3]
-        tbl['dec'] = [20.0, 20.1, 20.2, np.nan]
-        tbl['x'] = [100.0, 200.0, 300.0, 400.0]
-        tbl['y'] = [150.0, 250.0, 350.0, 450.0]
+        # Check MAGERR_AUTO
+        magerr_auto_key = SourceCatalogDataKey(measurement='auto', value='magerr', epoch=None)
+        assert magerr_auto_key in data
+        np.testing.assert_array_equal(data[magerr_auto_key], np.array([0.05, 0.06]))
         
-        catalog = SourceCatalog(tbl)
-        
-        ordered_keys = catalog.get_spatially_ordered_keys()
-        
-        # Should still return all keys (NaN go to end)
-        assert len(ordered_keys) == 4
-        assert set(ordered_keys) == {'1', '2', '3', '4'}
+        # Check FLUX_ISO
+        flux_iso_key = SourceCatalogDataKey(measurement='iso', value='flux', epoch=None)
+        assert flux_iso_key in data
+        np.testing.assert_array_equal(data[flux_iso_key], np.array([1000.0, 900.0]))
 
 
 class TestCoordinateMethods:
@@ -502,12 +504,11 @@ class TestCustomTransform:
         """Test custom column name mapping."""
         @dataclasses.dataclass
         class CustomTransform(SourceCatalogTableTransform):
-            ra_col: str = "RA_DEG"
-            dec_col: str = "DEC_DEG"
-            x_col: str = "PIX_X"
-            y_col: str = "PIX_Y"
-            obj_key_col: tuple = ("OBJ_ID", lambda col: col.astype(str))
-        
+            ra_col: TableColumnMapperT = "RA_DEG"
+            dec_col: TableColumnMapperT = "DEC_DEG"
+            x_col: TableColumnMapperT = "PIX_X"
+            y_col: TableColumnMapperT = "PIX_Y"
+            obj_key_col: TableColumnMapperT = ("OBJ_ID", lambda col: col.astype(str))
         tbl = Table()
         tbl['OBJ_ID'] = [1, 2, 3]
         tbl['RA_DEG'] = [10.0, 10.1, 10.2]
@@ -592,7 +593,7 @@ class TestSortObjectsByPosition:
         
         # Verify the spatial sort key column exists and is sorted
         assert "_source_catalog_spatial_sort_key" in catalog.table.colnames
-        sort_keys = list(catalog.table["_source_catalog_spatial_sort_key"])
+        sort_keys = list(catalog.table["_source_catalog_spatial_sort_key"])  # type: ignore
         assert sort_keys == sorted(sort_keys), "Sort keys should be in ascending order"
         
         # Verify that all properties are consistent with the new table order
@@ -602,7 +603,7 @@ class TestSortObjectsByPosition:
             assert catalog.dec_values[i] == catalog.table['dec'][i]
         
         # Verify that data access through properties matches table directly
-        assert list(catalog.object_keys) == list(catalog.table['id'])
+        assert list(catalog.object_keys) == list(catalog.table['id']) # type: ignore
     
     def test_sort_preserves_data_integrity(self):
         """Test that sorting preserves all data columns correctly."""
@@ -644,18 +645,15 @@ class TestSortObjectsByPosition:
         catalog1 = SourceCatalog(test_table.copy(), copy=True)
         catalog1.sort_objects_by_position(grid_divisions=5)
         assert "_source_catalog_spatial_sort_key" in catalog1.table.colnames
-        sort_keys1 = list(catalog1.table["_source_catalog_spatial_sort_key"])
+        sort_keys1 = list(catalog1.table["_source_catalog_spatial_sort_key"])  # type: ignore
         assert sort_keys1 == sorted(sort_keys1)
         
         # Test with grid_divisions=20
         catalog2 = SourceCatalog(test_table.copy(), copy=True)
         catalog2.sort_objects_by_position(grid_divisions=20)
-        sort_keys2 = list(catalog2.table["_source_catalog_spatial_sort_key"])
+        sort_keys2 = list(catalog2.table["_source_catalog_spatial_sort_key"])  # type: ignore
         assert sort_keys2 == sorted(sort_keys2)
         
-        # The ordering may differ between different grid divisions
-        # but both should be valid sorted orders
-
 
 class TestEdgeCases:
     """Test edge cases and error conditions."""

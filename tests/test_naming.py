@@ -9,24 +9,16 @@ Tests the NameTemplate generic class and StrSepNameTemplate for:
 - Edge cases and error handling
 """
 
-import pytest
 import re
 from pathlib import Path
 from typing import TypedDict
 
-from pyzma_idf_lightcurve.utils.naming import (
-    NameTemplate,
-    make_regex_stub_from_literal,
-    StrSepNameTemplate,
-    DashSeparated,
-    UnderscoreSeparated,
-    DotSeparated,
-)
+import pytest
 
 from pyzma_idf_lightcurve.utils.naming import (
+    DashSeparated,
     NameTemplate,
-    StrSepNameTemplate,
-    StrSepSegment,
+    UnderscoreSeparated,
     make_regex_stub_from_literal,
 )
 
