@@ -390,6 +390,101 @@ def sci_divided_by_coadd(
     )
 
 @asset(
+    deps=["partition_files", "sci_divided_by_coadd"],
+    partitions_def=group_chan_partitions,
+    description="Aperture photometry catalogs from sci_div images using photutils",
+    required_resource_keys={"idf_pipeline_config"}
+)
+def aperture_photometry_catalogs(
+    context: AssetExecutionContext,
+    sci_divided_by_coadd,
+    partition_files: dict[str, str],
+) -> MaterializeResult:
+    """Run photutils_lc_extraction.py to extract aperture photometry from sci_div images."""
+    # Get static pipeline config from resources
+    config: IDFPipelineConfig = context.resources.idf_pipeline_config
+    
+    partition_key = context.partition_key
+    op_name = f"aperture photometry {partition_key}"
+    
+    if not partition_files or "unc" not in partition_files:
+        context.log.warning(f"No sci file found for partition {partition_key}")
+        return MaterializeResult(
+            value="",
+            metadata={"catalogs_created": MetadataValue.int(0)}
+        )
+    
+    # Extract group_name and chan from partition key
+    group_name, chan = PartitionKey.get_components(partition_key)
+    
+    # Get sci_div file (created by sci_divided_by_coadd asset)
+    unc_file = Path(partition_files["unc"])
+    sci_div_file = Path(sci_divided_by_coadd)
+    
+    # Get superstack catalog based on channel
+    chan_superstack = "ch1"
+    superstack_catalog_path = Path(config.coadd_dir) / f"coadd_{chan_superstack}.ecsv"
+
+    # Output catalog path - same directory as sci_div, with .ecsv extension
+    output_file = IDFFilename.remake_filepath(
+        sci_div_file, 
+        parent_path=None, 
+        ext='.ecsv', 
+        suffix=''
+    )
+    
+    # Check files and timestamps
+    inputs_exist, outputs_up_to_date = check_files_and_timestamps(
+        context,
+        input_files=[sci_div_file, unc_file, superstack_catalog_path],
+        output_files=[output_file],
+        operation_name=op_name
+    )
+    
+    if not inputs_exist:
+        return MaterializeResult(
+            value="",
+            metadata={"catalogs_created": MetadataValue.int(0)}
+        )
+    
+    if outputs_up_to_date:
+        context.log.info(f"Output up to date: {output_file}")
+        return MaterializeResult(
+            value=str(output_file),
+            metadata={
+                "catalogs_created": MetadataValue.int(1),
+                "output_file": MetadataValue.text(str(output_file)),
+                "skipped": MetadataValue.bool(True)
+            }
+        )
+    
+    # Run photutils_lc_extraction.py
+    cmd = [
+        "python", config.photutils_lc_script,
+        str(superstack_catalog_path),
+        str(sci_div_file),
+        str(unc_file),
+        "-o", str(output_file)
+    ]
+    
+    result = run_subprocess_command(
+        context=context,
+        cmd=cmd,
+        operation_name=op_name,
+        partition_key=partition_key
+    )
+    
+    return MaterializeResult(
+        value=str(output_file),
+        metadata={
+            "catalogs_created": MetadataValue.int(1),
+            "partition_key": MetadataValue.text(partition_key),
+            "output_file": MetadataValue.text(str(output_file)),
+            "command": MetadataValue.text(" ".join(cmd))
+        }
+    )
+
+@asset(
     deps=["partition_files"],
     partitions_def=group_chan_partitions,
     description="Weight files created from uncertainty files",
@@ -907,7 +1002,8 @@ def idf_lightcurve_storage_populated(
 
 
 @asset(
-    ins={"storage_path": AssetIn("idf_lightcurve_storage_populated")},
+    deps=["idf_lightcurve_storage_populated"],
+    ins={"storage_path": AssetIn("idf_lightcurve_storage_empty")},
     description="Finalize lightcurve storage by consolidating Zarr metadata for fast reads",
     required_resource_keys={"idf_pipeline_config"}
 )
@@ -952,6 +1048,7 @@ asset_defs = [
     prepared_input_file_symlinks,
     partition_files,
     sci_divided_by_coadd,
+    aperture_photometry_catalogs,
     wht_from_unc,
     sci_lac_cleaned,
     cat_from_sci,

@@ -1,249 +1,107 @@
-"""
-Main Plotly Dash application for interactive lightcurve visualization.
-"""
+"""Modern Dash v3 application for IDF Lightcurve visualization."""
 
-
+import time
+import logging
 import dash
-import numpy as np
-import plotly.graph_objects as go
-from dash import Input, Output, dash_table, dcc, html
+from dash import html, dcc
+import dash_mantine_components as dmc
 
-from ..binary import BinaryLightcurveDatabase
-from ..data import LightcurveDatabase, LightcurveQueryEngine
+from .components.storage_loader import create_storage_loader
+from .components.storage_info_tab import create_storage_info_tab
+from .components.viz_tab import create_viz_tab
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] %(levelname)s: %(message)s',
+    datefmt='%H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 
-class LightcurveVisualizationApp:
+def create_app(initial_storage_path=None):
+    """Create and configure the Dash v3 application.
+    
+    Dash v3 automatically handles React 18.2.0+ configuration.
+    No need to manually set React version.
+    
+    Args:
+        initial_storage_path: Optional initial storage path to pre-populate the input field
     """
-    High-performance interactive lightcurve visualization using Plotly Dash.
+    start_time = time.time()
+    logger.info("Creating Dash application...")
     
-    Features:
-    - Interactive object selection and filtering
-    - Multi-panel views (different methods, channels, flux types)
-    - Real-time querying with database backend
-    - Responsive design for large datasets
-    - Export capabilities
+    app = dash.Dash(
+        __name__,
+        external_stylesheets=dmc.styles.ALL,
+        suppress_callback_exceptions=True,
+        title="IDF Lightcurve Viewer"
+    )
+    logger.info(f"Dash app initialized ({time.time() - start_time:.2f}s)")
+    
+    layout_start = time.time()
+    logger.info("Building layout...")
+    app.layout = dmc.MantineProvider([
+        dcc.Store(id='storage-data', storage_type='memory'),
+        dcc.Store(id='selected-objects', storage_type='memory', data=[]),
+        
+        dmc.Container([
+            dmc.Title("IDF Lightcurve Viewer", order=1, mb="md"),
+            dmc.Text("Visualize lightcurves from the Infrared Deep Field",
+                    c="gray", size="sm", mb="xl"),
+        ], fluid=True, p="md"),
+        
+        dmc.Container([
+            dmc.Paper(create_storage_loader(initial_storage_path), shadow="sm", p="md", mb="md", withBorder=True)
+        ], fluid=True, px="md"),
+        
+        dmc.Container([
+            dmc.Tabs([
+                dmc.TabsList([
+                    dmc.TabsTab("Storage Info", value="info"),
+                    dmc.TabsTab("Visualization", value="viz"),
+                ]),
+                dmc.TabsPanel(create_storage_info_tab(), value="info"),
+                dmc.TabsPanel(create_viz_tab(), value="viz"),
+            ], id="main-tabs", value="info")
+        ], fluid=True, px="md"),
+        
+        html.Div(id='notifications-container'),
+    ])
+    logger.info(f"Layout built ({time.time() - layout_start:.2f}s)")
+    
+    callbacks_start = time.time()
+    logger.info("Registering callbacks...")
+    from . import callbacks
+    callbacks.register_callbacks(app)
+    logger.info(f"Callbacks registered ({time.time() - callbacks_start:.2f}s)")
+    
+    logger.info(f"App creation complete ({time.time() - start_time:.2f}s total)")
+    return app
+
+
+def run_app(debug=True, port=8050, host='0.0.0.0', storage_path=None):
+    """Run the Dash application.
+    
+    Args:
+        debug: Enable debug mode with hot reload
+        port: Port to run the server on
+        host: Host to bind to (default: 0.0.0.0 for all interfaces)
+        storage_path: Optional initial storage path to pre-populate the input field
+    
+    Note: In Dash v3, app.run_server() was replaced by app.run()
     """
+    logger.info(f"Starting app on {host}:{port} (debug={debug})")
+    app = create_app(initial_storage_path=storage_path)
     
-    def __init__(self, db_path: str, use_binary: bool = True):
-        self.db_path = db_path
-        self.use_binary = use_binary
-        
-        if use_binary:
-            self.db = BinaryLightcurveDatabase(db_path)
-        else:
-            self.db = LightcurveDatabase(db_path)
-            self.query_engine = LightcurveQueryEngine(self.db)
-            
-        self.app = dash.Dash(__name__)
-        self.setup_layout()
-        self.setup_callbacks()
+    # Configure Flask's logger to show at INFO level
+    if debug:
+        app.logger.setLevel(logging.INFO)
+        logging.getLogger('werkzeug').setLevel(logging.INFO)
     
-    def setup_layout(self):
-        """Create the app layout with all components."""
-        
-        self.app.layout = html.Div([
-            # Header
-            html.H1("IDF Lightcurve Explorer", className="header"),
-            
-            # Control Panel
-            html.Div([
-                html.Div([
-                    # Object Selection
-                    html.Label("Object ID:"),
-                    dcc.Input(
-                        id='object-id-input',
-                        type='number',
-                        placeholder='Enter object ID',
-                        value=1
-                    ),
-                ], className="control-group"),
-                
-                html.Div([
-                    # Measurement Type
-                    html.Label("Measurement Type:"),
-                    dcc.Dropdown(
-                        id='type-dropdown',
-                        options=[
-                            {'label': 'CH1 AUTO Original', 'value': 1},
-                            {'label': 'CH1 AUTO LAC Cleaned', 'value': 2},
-                            {'label': 'CH2 AUTO Original', 'value': 3},
-                            {'label': 'CH2 AUTO LAC Cleaned', 'value': 4},
-                        ],
-                        value=1
-                    ),
-                ], className="control-group"),
-                
-                html.Div([
-                    # Time Range
-                    html.Label("Time Range (MJD):"),
-                    dcc.RangeSlider(
-                        id='time-range-slider',
-                        min=55000,
-                        max=58000,
-                        step=1,
-                        value=[55000, 58000],
-                        marks={
-                            55000: '2009',
-                            56000: '2012', 
-                            57000: '2015',
-                            58000: '2018'
-                        }
-                    ),
-                ], className="control-group"),
-                
-                html.Button("Load Lightcurve", id="load-button", n_clicks=0),
-                
-            ], className="control-panel"),
-            
-            # Main Plot Area
-            dcc.Graph(id="lightcurve-plot"),
-            
-            # Statistics Panel
-            html.Div(id="stats-panel"),
-            
-            # Data Table
-            html.Div([
-                html.H3("Lightcurve Data"),
-                dash_table.DataTable(
-                    id='lightcurve-table',
-                    columns=[
-                        {"name": "MJD", "id": "time"},
-                        {"name": "Magnitude", "id": "magnitude"},
-                        {"name": "Error", "id": "mag_error"},
-                        {"name": "Flags", "id": "flags"},
-                    ],
-                    page_size=20,
-                    sort_action="native",
-                    filter_action="native"
-                )
-            ])
-        ])
-    
-    def setup_callbacks(self):
-        """Setup interactive callbacks."""
-        
-        @self.app.callback(
-            [Output('lightcurve-plot', 'figure'),
-             Output('stats-panel', 'children'),
-             Output('lightcurve-table', 'data')],
-            [Input('load-button', 'n_clicks')],
-            [dash.dependencies.State('object-id-input', 'value'),
-             dash.dependencies.State('type-dropdown', 'value'),
-             dash.dependencies.State('time-range-slider', 'value')]
-        )
-        def update_lightcurve(n_clicks, object_id, type_id, time_range):
-            if n_clicks == 0 or not object_id:
-                return {}, "Select an object to view lightcurve", []
-            
-            # Get lightcurve data
-            if self.use_binary:
-                lightcurve = self.db.get_lightcurve(object_id, type_id)
-                if not lightcurve:
-                    return {}, f"No data found for object {object_id}", []
-                
-                # Apply time filtering
-                times = lightcurve['times']
-                magnitudes = lightcurve['magnitudes']
-                mag_errors = lightcurve['mag_errors']
-                flags = lightcurve['flags']
-                
-                # Filter by time range
-                mask = (times >= time_range[0]) & (times <= time_range[1])
-                times = times[mask]
-                magnitudes = magnitudes[mask]
-                mag_errors = mag_errors[mask]
-                flags = flags[mask]
-                
-            else:
-                # Traditional database query
-                df = self.query_engine.get_lightcurve(
-                    object_id=object_id,
-                    time_range=tuple(time_range)
-                )
-                
-                if df.empty:
-                    return {}, f"No data found for object {object_id}", []
-                
-                times = df['obs_time'].values
-                magnitudes = df['magnitude'].values
-                mag_errors = df['mag_err'].values
-                flags = df['flags'].values
-            
-            # Create plot
-            fig = go.Figure()
-            
-            # Add lightcurve points
-            fig.add_trace(go.Scatter(
-                x=times,
-                y=magnitudes,
-                error_y=dict(type='data', array=mag_errors, visible=True),
-                mode='markers',
-                marker=dict(size=4, color='blue'),
-                name='Lightcurve',
-                hovertemplate='MJD: %{x:.3f}<br>Mag: %{y:.3f}<br>Error: %{error_y.array:.3f}<extra></extra>'
-            ))
-            
-            # Customize layout
-            fig.update_layout(
-                title=f"Object {object_id} - Type {type_id}",
-                xaxis_title="Time (MJD)",
-                yaxis_title="Magnitude",
-                yaxis=dict(autorange="reversed"),  # Magnitude scale (brighter is up)
-                height=500,
-                hovermode='closest'
-            )
-            
-            # Calculate statistics
-            if len(magnitudes) > 0:
-                stats = html.Div([
-                    html.H3("Statistics"),
-                    html.P(f"Number of points: {len(magnitudes)}"),
-                    html.P(f"Mean magnitude: {np.mean(magnitudes):.3f}"),
-                    html.P(f"Magnitude std: {np.std(magnitudes):.4f}"),
-                    html.P(f"Time span: {np.max(times) - np.min(times):.1f} days"),
-                    html.P(f"Mean error: {np.mean(mag_errors):.4f}"),
-                ])
-            else:
-                stats = html.P("No data points in selected range")
-            
-            # Prepare table data
-            table_data = [
-                {
-                    "time": f"{t:.3f}",
-                    "magnitude": f"{m:.3f}",
-                    "mag_error": f"{e:.4f}",
-                    "flags": int(f)
-                }
-                for t, m, e, f in zip(times, magnitudes, mag_errors, flags)
-            ]
-            
-            return fig, stats, table_data
-    
-    def run_server(self, debug=True, port=8050):
-        """Start the Dash server."""
-        self.app.run_server(debug=debug, port=port)
-
-
-def main():
-    """CLI entry point for the visualization app."""
-    try:
-        import typer
-    except ImportError:
-        print("Error: typer is required for the CLI. Install with: pip install typer")
-        return
-    
-    def run_viz(
-        db_path: str = typer.Option("lightcurves.db", help="Path to lightcurve database"),
-        port: int = typer.Option(8050, help="Port to run the server on"),
-        debug: bool = typer.Option(False, help="Run in debug mode"),
-        binary: bool = typer.Option(True, help="Use binary blob storage")
-    ):
-        app = LightcurveVisualizationApp(db_path, use_binary=binary)
-        print(f"Starting lightcurve visualization server on port {port}")
-        app.run_server(debug=debug, port=port)
-    
-    typer.run(run_viz)
+    logger.info("Starting server...")
+    app.run(debug=debug, port=port, host=host)
 
 
 if __name__ == "__main__":
-    main()
+    run_app()

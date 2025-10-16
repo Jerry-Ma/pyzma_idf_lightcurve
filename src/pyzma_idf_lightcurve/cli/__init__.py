@@ -53,33 +53,46 @@ def pipeline(
 
 @app.command()
 def viz(
-    db_path: Annotated[
-        str, typer.Option("--db-path", "-d", help="Path to lightcurve database"),
-    ] = "lightcurves.db",
     port: Annotated[
         int,
         typer.Option("--port", "-p", help="Port to run the visualization server on"),
     ] = 8050,
+    host: Annotated[
+        str,
+        typer.Option("--host", "-h", help="Host to bind to (default: 0.0.0.0 for all interfaces)"),
+    ] = "0.0.0.0",
+    storage_path: Annotated[
+        str | None,
+        typer.Option("--storage-path", "-s", help="Pre-populate storage path in the UI"),
+    ] = None,
     *,
     debug: Annotated[
         bool, typer.Option("--debug", help="Run in debug mode"),
     ] = False,
-    binary: Annotated[
-        bool, typer.Option("--binary", help="Use binary blob storage"),
-    ] = True,
 ) -> None:
-    """Start the interactive lightcurve visualization web application."""
-    from ..lightcurve.dash.app import LightcurveVisualizationApp
+    """Start the interactive Dash v3 lightcurve visualization web application.
+    
+    This command starts a modern Dash v3 application for exploring IDF lightcurve
+    data stored in xarray/zarr format. Load your zarr storage through the web UI.
+    
+    By default, the server binds to 0.0.0.0 (all interfaces) so it's accessible
+    from other machines. Use --host 127.0.0.1 to restrict to localhost only.
+    """
+    from ..lightcurve.dash import run_app
 
-    console.print("[bold blue]Starting IDF Lightcurve Visualization[/bold blue]")
-    console.print(f"Database: {db_path}")
+    console.print("[bold blue]Starting IDF Lightcurve Visualization (Dash v3)[/bold blue]")
+    console.print(f"Host: {host}")
     console.print(f"Port: {port}")
-    console.print(f"Binary storage: {binary}")
     console.print(f"Debug mode: {debug}")
-    console.print(f"URL: http://localhost:{port}")
+    if storage_path:
+        console.print(f"Initial storage path: {storage_path}")
+    if host == "0.0.0.0":
+        console.print(f"URL: http://localhost:{port} (or use your machine's IP)")
+    else:
+        console.print(f"URL: http://{host}:{port}")
+    console.print("\n[dim]Load your zarr storage through the web interface[/dim]")
 
-    app_viz = LightcurveVisualizationApp(db_path, use_binary=binary)
-    app_viz.run_server(debug=debug, port=port)
+    run_app(debug=debug, port=port, host=host, storage_path=storage_path)
 
 
 @app.command()
@@ -94,7 +107,10 @@ def info():
         "--config config.yaml[/dim]",
     )
     console.print(
-        f"• [dim]{app.info.name} viz --port 8051 --db-path my.db[/dim]",
+        f"• [dim]{app.info.name} viz --port 8051 --debug[/dim]",
+    )
+    console.print(
+        f"• [dim]{app.info.name} viz --storage-path scratch_dagster/idf_lightcurves.zarr[/dim]",
     )
 
     # Print configuration info

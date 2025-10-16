@@ -30,26 +30,25 @@ dependencies = [
   "loguru>=0.6.0",
   "xarray>=2023.1.0",
   "zarr>=3.0.0",
-
   # Dagster pipeline
   "dagster>=1.5.0",
   "dagster-duckdb>=0.21.0",
   "dagster-webserver>=0.21.0",
-
   # Database
   "duckdb>=0.9.0",
-
-  # Visualization
+  # Visualization - Updated to Dash v3
   "plotly>=5.0.0",
-  "dash>=2.10.0",
+  "dash>=3.0.0,<4.0.0",
+  "dash-mantine-components>=0.14.0",
+  "dash-ag-grid>=31.0.0",
   "matplotlib>=3.5.0",
-
   # Image processing (for future use)
   "scipy>=1.9.0",
   "scikit-image>=0.19.0",
-
   # Configuration
   "pyyaml>=6.0.0",
+  "photutils>=2.3.0",
+  "iprogress>=0.4",
 ]
 
 [project.optional-dependencies]

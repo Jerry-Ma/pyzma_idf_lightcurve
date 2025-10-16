@@ -27,6 +27,7 @@ class IDFPipelineConfig(Config):
     make_wht_script: str = Field(description="Path to make_wht.py script for weight map creation")
     lac_script: str = Field(description="Path to lac.py script for lightcurve analysis and extraction")
     cat2cat_script: str = Field(description="Path to cat2cat.py script for catalog cross-matching")
+    photutils_lc_script: str = Field(description="Path to photutils_lc_extraction.py script for aperture photometry")
     
     # Configuration files - all required with validation
     sex_config_file: str = Field(

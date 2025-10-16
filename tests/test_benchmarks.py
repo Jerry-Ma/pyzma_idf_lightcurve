@@ -561,6 +561,139 @@ class TestBenchmarkMemory:
 
 
 # ============================================================================
+# BENCHMARK TESTS - Coordinate Extraction Patterns
+# ============================================================================
+
+
+class TestBenchmarkCoordinateExtraction:
+    """Benchmark coordinate extraction patterns used in dash app.
+    
+    These tests measure the actual patterns used for building AgGrid tables:
+    - Extracting ALL coordinates (current pattern)
+    - Extracting SELECTIVE coordinates (proposed optimization)
+    """
+    
+    @pytest.fixture(scope="class")
+    def storage_with_data(self, large_temp_dir, benchmark_source_catalog):
+        """Create populated storage for coordinate extraction tests."""
+        storage_path = large_temp_dir / "coord_extraction_benchmark"
+        if storage_path.exists():
+            shutil.rmtree(storage_path)
+        
+        epoch_keys = [f"r{58520832 + i * 256}" for i in range(100)]
+        storage = LightcurveStorage(storage_path)
+        storage.create_for_per_epoch_write(
+            source_catalog=benchmark_source_catalog,
+            epoch_keys=epoch_keys,
+        )
+        
+        # Populate first 10 epochs to have realistic data
+        for i in range(10):
+            storage.populate_epoch(
+                epoch_key=epoch_keys[i],
+                source_catalog=benchmark_source_catalog,
+            )
+        
+        storage.rechunk_for_per_object_read()
+        storage.load_for_per_object_read()
+        return storage
+    
+    @pytest.mark.benchmark(group="coordinate_extraction")
+    def test_benchmark_extract_all_object_coords(self, benchmark, storage_with_data):
+        """Benchmark extracting ALL object coordinates (current dash app pattern).
+        
+        This mimics the current implementation that extracts all coordinates
+        for the object dimension, regardless of which ones are displayed.
+        """
+        storage = storage_with_data
+        ds = storage.lightcurves
+        
+        def extract_all_coords():
+            import pandas as pd
+            dim_name = 'object'
+            data = {dim_name: ds.coords[dim_name].values}
+            
+            # Extract ALL coordinates with 'object' dimension
+            for coord_name in ds.coords:
+                coord = ds.coords[coord_name]
+                if dim_name in coord.dims and len(coord.dims) == 1:
+                    data[coord_name] = coord.values
+            
+            return pd.DataFrame(data)
+        
+        result = benchmark(extract_all_coords)
+        assert len(result) == 10_000
+    
+    @pytest.mark.benchmark(group="coordinate_extraction")
+    def test_benchmark_extract_selective_object_coords(self, benchmark, storage_with_data):
+        """Benchmark extracting SELECTIVE object coordinates (proposed optimization).
+        
+        This tests the proposed optimization: only extract coordinates
+        that are actually displayed in the AgGrid table.
+        """
+        storage = storage_with_data
+        ds = storage.lightcurves
+        
+        def extract_selective_coords():
+            import pandas as pd
+            # Only extract what we display in the AgGrid
+            needed_coords = ['object', 'ra', 'dec', 'x_image', 'y_image']
+            data = {}
+            
+            for coord_name in needed_coords:
+                if coord_name in ds.coords:
+                    data[coord_name] = ds.coords[coord_name].values
+            
+            return pd.DataFrame(data)
+        
+        result = benchmark(extract_selective_coords)
+        assert len(result) == 10_000
+    
+    @pytest.mark.benchmark(group="coordinate_extraction")
+    def test_benchmark_extract_all_epoch_coords(self, benchmark, storage_with_data):
+        """Benchmark extracting ALL epoch coordinates (current dash app pattern)."""
+        storage = storage_with_data
+        ds = storage.lightcurves
+        
+        def extract_all_coords():
+            import pandas as pd
+            dim_name = 'epoch'
+            data = {dim_name: ds.coords[dim_name].values}
+            
+            # Extract ALL coordinates with 'epoch' dimension
+            for coord_name in ds.coords:
+                coord = ds.coords[coord_name]
+                if dim_name in coord.dims and len(coord.dims) == 1:
+                    data[coord_name] = coord.values
+            
+            return pd.DataFrame(data)
+        
+        result = benchmark(extract_all_coords)
+        assert len(result) == 100
+    
+    @pytest.mark.benchmark(group="coordinate_extraction")
+    def test_benchmark_extract_selective_epoch_coords(self, benchmark, storage_with_data):
+        """Benchmark extracting SELECTIVE epoch coordinates (proposed optimization)."""
+        storage = storage_with_data
+        ds = storage.lightcurves
+        
+        def extract_selective_coords():
+            import pandas as pd
+            # Only extract what we display in the AgGrid
+            needed_coords = ['epoch', 'mjd', 'aor_key']
+            data = {}
+            
+            for coord_name in needed_coords:
+                if coord_name in ds.coords:
+                    data[coord_name] = ds.coords[coord_name].values
+            
+            return pd.DataFrame(data)
+        
+        result = benchmark(extract_selective_coords)
+        assert len(result) == 100
+
+
+# ============================================================================
 # BENCHMARK TESTS - Scaling with Large Datasets
 # ============================================================================
 

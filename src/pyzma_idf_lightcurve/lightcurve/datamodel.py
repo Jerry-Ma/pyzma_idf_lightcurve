@@ -39,7 +39,6 @@ class LightcurveStorage:
     - Support for region-based writes for distributed processing
     """
     storage_path: Path
-    lightcurves: xr.DataArray | None = dataclasses.field(init=False, default=None)
     _dataset: xr.Dataset | None = dataclasses.field(init=False, default=None)
     _zarr_path_loaded : Path |None  = dataclasses.field(init=False, default=None)
     _zarr_path_for_write : Path  = dataclasses.field(init=False)
@@ -53,6 +52,16 @@ class LightcurveStorage:
         self._zarr_path_for_read = self.storage_path / f"{self.lc_var_name}_read.zarr"
     
     @property
+    def dataset(self):
+        return self._dataset
+    
+    @property
+    def lightcurves(self):
+        if self.dataset is None:
+            return None
+        return self.dataset[self.lc_var_name]
+    
+    @property
     def zarr_path_for_write(self):
         return self._zarr_path_for_write
 
@@ -61,19 +70,41 @@ class LightcurveStorage:
         return self._zarr_path_for_read
 
     def is_loaded(self):
-        return self.lightcurves is not None
+        return self.dataset is not None
 
-    def _validate_dim_args(self, source_catalog: SourceCatalog, dim_name: str, dim_keys: list[str] | None, dim_vars: dict[str, np.ndarray]) -> tuple[int, list[str], dict[str, np.ndarray]]:
+    def _validate_dim_args(self, source_catalog: SourceCatalog, dim_name: DimNameT, dim_keys: list[str] | None, dim_vars: dict[DimNameT, dict[str, np.ndarray]]) -> tuple[int, list[str], dict[str, np.ndarray]]:
         if dim_keys is None:
             logger.debug(f"use all {dim_name}_keys from source catalog {source_catalog}")
             dim_keys = list(getattr(source_catalog, f"{dim_name}_keys"))
             if not dim_keys:
                 raise ValueError("no keys specified for {dim_name}")
         n_dim_keys = len(dim_keys)
-        for var in dim_vars.values():
+        vars = dim_vars.get(dim_name, {})
+        vars_out = {}
+        for k, var in vars.items():
             if len(var) != n_dim_keys:
                 raise ValueError(f"mismatch size between dim_keys ({n_dim_keys}) and dim_var {var} ({len(var)}).")
-        return n_dim_keys, dim_keys, dim_vars
+            # make sure we convert any dtype=object object to str type so that they are properly chunked
+            if var.dtype == object:
+                logger.debug(f"convert variable {k} ({var.dtype}) to str")
+                var = var.astype(str)
+            if isinstance(var, np.ma.MaskedArray):
+                if var.mask.all():
+                    logger.info(f"ignore varaible {k} ({var.dtype}) which is all masked.")
+                    continue
+                if var.dtype.type == np.str_:
+                    fill_value = ""
+                elif var.dtype == float or var.dtype == complex:
+                    fill_value = np.nan
+                else:
+                    fill_value = None
+                if fill_value is None:
+                    logger.debug(f"variable {k} ({var.dtype}) contains masked value and cannot be automatically filled.")
+                else:
+                    logger.debug(f"fill varaible {k} ({var.dtype}) with {fill_value=}")
+                    var = var.filled(fill_value)
+            vars_out[k] = var
+        return n_dim_keys, dim_keys, vars_out
 
     def _create(
         self,
@@ -105,11 +136,10 @@ class LightcurveStorage:
         if zarr_chunks is None:
             zarr_chunks = {}
 
-        n_measurements, measurement_keys, measurement_vars = self._validate_dim_args(source_catalog, "measurement", measurement_keys, dim_vars.get("measurement", {}))
-        n_values, value_keys, value_vars = self._validate_dim_args(source_catalog, "value", value_keys, dim_vars.get("value", {}))
-        n_epochs, epoch_keys, epoch_vars = self._validate_dim_args(source_catalog, "epoch", epoch_keys, dim_vars.get("epoch", {}))
-        object_keys = source_catalog.object_keys
-        n_objects = len(object_keys)
+        n_objects, object_keys, object_vars = self._validate_dim_args(source_catalog, "object", None, dim_vars)
+        n_measurements, measurement_keys, measurement_vars = self._validate_dim_args(source_catalog, "measurement", measurement_keys, dim_vars)
+        n_values, value_keys, value_vars = self._validate_dim_args(source_catalog, "value", value_keys, dim_vars)
+        n_epochs, epoch_keys, epoch_vars = self._validate_dim_args(source_catalog, "epoch", epoch_keys, dim_vars)
         logger.info(f"create storage for: {n_objects=} {n_measurements=} {n_values=} {n_epochs=}")
         
         import dask.array as da
@@ -148,6 +178,7 @@ class LightcurveStorage:
         
         # attach dim vars
         for dn, vars in [
+            ("object", object_vars),
             ("measurement", measurement_vars),
             ("value", value_vars),
             ("epoch", epoch_vars),
@@ -157,7 +188,7 @@ class LightcurveStorage:
 
         # Add coordinate arrays as non-dimension coordinates
         # These are kept as numpy arrays (not chunked) to avoid chunk alignment issues
-        ra_vals, dec_vals, x_vals, y_vals = source_catalog.get_coordinate_arrays_for_objects(object_keys.tolist())
+        ra_vals, dec_vals, x_vals, y_vals = source_catalog.get_coordinate_arrays_for_objects(object_keys)
         
         # Ensure coordinates are plain numpy arrays, not Dask arrays
         lc_var = lc_var.assign_coords(
@@ -197,7 +228,7 @@ class LightcurveStorage:
         kwargs["consolidated"] = False
         return self._create(self.zarr_path_for_write, *args, **kwargs)
 
-    def rechunk_for_per_object_read(self, chunk_size=1000) -> None:
+    def rechunk_for_per_object_read(self, chunk_size=-1) -> None:
         lc_var = self.load_for_per_epoch_write()
         ds = self._dataset
         assert ds is not None
@@ -249,8 +280,9 @@ class LightcurveStorage:
         # Use chunks={} to preserve native Zarr chunks without Dask rechunking
         # Empty dict tells xarray to use Zarr's native chunks for all variables
         # This prevents automatic Dask chunking that can cause alignment issues with large arrays
-        ds = self._dataset = xr.open_zarr(zarr_path, consolidated=consolidated, chunks={})  # type: ignore[arg-type]
-        lc_var = self.lightcurves = ds[self.lc_var_name]
+        self._dataset = xr.open_zarr(zarr_path, consolidated=consolidated, chunks={})  # type: ignore[arg-type]
+        lc_var = self.lightcurves
+        assert lc_var is not None
         logger.info(f"Loaded lightcurve storage from {zarr_path}")
         self._zarr_path_loaded = zarr_path
         return lc_var
@@ -262,9 +294,9 @@ class LightcurveStorage:
         return self._load(self.zarr_path_for_write, consolidated=False)
 
     def close(self):
-        if self.lightcurves is not None:
-            self.lightcurves.close()
-            self.lightcurves = None
+        if self.dataset is not None:
+            self.dataset.close()
+            self._dataset = None
             self._zarr_path_loaded = None
 
     def populate_epoch(
@@ -384,7 +416,7 @@ class LightcurveStorage:
         Returns:
             xarray DataArray with requested lightcurve data (view when possible)
         """
-        if self.lightcurves is None:
+        if not self.is_loaded():
             self.load_for_per_object_read()
         assert self.lightcurves is not None, "Failed to load lightcurves storage"
         
@@ -411,7 +443,7 @@ class LightcurveStorage:
         Returns:
             xarray DataArray with epoch data (view when possible)
         """
-        if self.lightcurves is None:
+        if not self.is_loaded():
             self.load_for_per_epoch_write()
         assert self.lightcurves is not None, "Failed to load lightcurves storage"
             
