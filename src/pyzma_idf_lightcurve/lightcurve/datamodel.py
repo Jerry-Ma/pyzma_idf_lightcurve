@@ -175,41 +175,11 @@ class LightcurveStorage:
             'description': 'IDF lightcurve data',
             'created': str(np.datetime64('now')),
         } | {f"n_{dn}s": dim_sizes[dn] for dn in dim_names})
-        
-        # attach dim vars
-        for dn, vars in [
-            ("object", object_vars),
-            ("measurement", measurement_vars),
-            ("value", value_vars),
-            ("epoch", epoch_vars),
-                         ]:
-            for name, array in vars.items():
-                ds[f"{dn}_{name}"] = ((dn, ), array)
-
-        # Add coordinate arrays as non-dimension coordinates
-        # These are kept as numpy arrays (not chunked) to avoid chunk alignment issues
-        ra_vals, dec_vals, x_vals, y_vals = source_catalog.get_coordinate_arrays_for_objects(object_keys)
-        
-        # Ensure coordinates are plain numpy arrays, not Dask arrays
-        lc_var = lc_var.assign_coords(
-            ra=('object', np.asarray(ra_vals)),
-            dec=('object', np.asarray(dec_vals)),
-            x_image=('object', np.asarray(x_vals)),
-            y_image=('object', np.asarray(y_vals))
-        )
-        # update ds with updated variables
-        ds[lc_var_name] = lc_var
-        # update chunk to match specific chunk scheme
-        # _zarr_chunks = tuple(
-        #     zarr_chunks.get(dn, dim_sizes[dn])
-        #     for dn in dim_names
-        # )
         _zarr_chunks = {
             dn: zarr_chunks.get(dn, -1)
             for dn in dim_names
         }
         ds = ds.chunk(_zarr_chunks)
-
         # Write to zarr without computing array values (only metadata)
         # This is the key trick from xarray docs - creates the store structure without allocating data
         logger.info(f"Writing zarr metadata: shape={shape}, chunk_shape={_zarr_chunks}")
@@ -219,6 +189,51 @@ class LightcurveStorage:
             }
         }
         ds.to_zarr(zarr_path, mode='w', zarr_format=3, encoding=encoding, compute=False, consolidated=consolidated)
+
+        # now we can load back to add more variables
+        ds = xr.open_zarr(zarr_path, consolidated=consolidated)
+
+        var_chunks = {}
+        # attach dim vars
+        for dn, vars in [
+            ("object", object_vars),
+            ("measurement", measurement_vars),
+            ("value", value_vars),
+            ("epoch", epoch_vars),
+                         ]:
+            for name, array in vars.items():
+                ds[f"{dn}_{name}"] = ((dn, ), array)
+                var_chunks[f"{dn}_{name}"] = _zarr_chunks
+
+        # Add coordinate arrays as non-dimension coordinates
+        # These are kept as numpy arrays (not chunked) to avoid chunk alignment issues
+        ra_vals, dec_vals, x_vals, y_vals = source_catalog.get_coordinate_arrays_for_objects(object_keys)
+        
+        # Ensure coordinates are plain numpy arrays, not Dask arrays
+        ds["object_ra"] = ("object", np.asarray(ra_vals))
+        ds["object_dec"] = ("object", np.asarray(dec_vals))
+        ds["object_x_image"] = ("object", np.asarray(x_vals))
+        ds["object_y_image"] = ("object", np.asarray(y_vals))
+        var_chunks["object_ra"] = _zarr_chunks
+        var_chunks["object_dec"] = _zarr_chunks
+        var_chunks["object_x_image"] = _zarr_chunks
+        var_chunks["object_y_image"] = _zarr_chunks
+        # lc_var = lc_var.assign_coords(
+        #     ra=('object', np.asarray(ra_vals)),
+        #     dec=('object', np.asarray(dec_vals)),
+        #     x_image=('object', np.asarray(x_vals)),
+        #     y_image=('object', np.asarray(y_vals))
+        # )
+        # update ds with updated variables
+        # ds[lc_var_name] = lc_var
+        # update chunk to match specific chunk scheme
+        # _zarr_chunks = tuple(
+        #     zarr_chunks.get(dn, dim_sizes[dn])
+        #     for dn in dim_names
+        # )
+        # ds = ds.chunk(_zarr_chunks)
+        encoding = {var: {"compressors": None, "chunks": var_chunks[var]} for var in var_chunks}
+        ds.to_zarr(zarr_path, mode='w', zarr_format=3, encoding=encoding, compute=True, consolidated=consolidated)
 
     def create_for_per_epoch_write(self, *args, **kwargs):
         # set epoch chunk size to 1 for parallel writing per-epoch.
@@ -239,8 +254,9 @@ class LightcurveStorage:
         chunks_dict["object"] = chunk_size
         chunks_dict["epoch"] = -1  # All epochs in one chunk for per-object read
         
-        logger.info(f"current storage chunks: {ds.chunks}")
-        rechunked_ds = ds.chunk(chunks_dict)
+        ds_unified = ds.unify_chunks()
+        logger.info(f"current storage chunks: {ds_unified.chunks}")
+        rechunked_ds = ds_unified.chunk(chunks_dict)
         logger.info(f"rechunked storage chunks for read: {rechunked_ds[self.lc_var_name].chunks}")
 
         # this clears all built-in encodings to make sure the new chunks is used when saving.

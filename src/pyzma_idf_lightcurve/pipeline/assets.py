@@ -61,24 +61,65 @@ class IDFSExtractorTableTransform(SExtractorTableTransform):
     table_key: str |None = None
     epoch_key: str |None = None
     obj_key_col: TableColumnMapperT = ("NUMBER", lambda col: np.array([f"I{v}" for v in col]))
+    data_colname_identify_regex: re.Pattern = re.compile(r"^(MAG|MAGERR)_.+")
     
     def __post_init__(self):
         if self.table_key is None or self.epoch_key is None:
             raise ValueError("table_key and epoch_key must be provided")
 
     def data_keys_to_data_colname(self, keys: SourceCatalogDataKey) -> str:
-        sep = self.colname_template_cls.sep
-        colname_suffix = re.sub(f"{self.table_key}", "", keys.measurement)
-        return f"{keys.value}{sep}{colname_suffix}".upper()
+        parts = self.data_key_template_cls.parse(keys.measurement)
+        return f"{parts['suffix']}".upper()
 
+    # becuase we need to combine the photutils cats and sextractor cats together, we'll use generic
+    # value types [value, uncertainty]
     def data_colname_to_data_keys(self, colname: str) -> SourceCatalogDataKey:
-        sep = self.colname_template_cls.sep
-        parts = self.colname_template_cls.parse(colname.lower())
+        colname = colname.lower()
+        parts = self.colname_template_cls.parse(colname)
+        sep = self.data_key_template_cls.sep
+        if parts["stem"] == "mag":
+            value_key = "value"
+        elif parts["stem"] == "magerr":
+            value_key = "uncertainty"
+            colname = colname.replace("err", "")
+        else:
+            assert False, f"Unexpected stem value: {parts['stem']}"
         return SourceCatalogDataKey(
-            measurement=f"{self.table_key}{parts['suffix']}",
-            value = parts["stem"],
+            measurement=f"{self.table_key}{sep}{colname}",
+            value = value_key,
             epoch = self.epoch_key,
             )
+
+@dataclasses.dataclass
+class IDFPhotUtilsTableTransform(IDFSExtractorTableTransform):
+
+    data_colname_identify_regex: re.Pattern = re.compile(r"^(mean|median|biweight_location|std|mad_std|biweight_scale)_.+")
+
+    def data_keys_to_data_colname(self, keys: SourceCatalogDataKey) -> str:
+        parts = self.data_key_template_cls.parse(keys.measurement)
+        return f"{parts['suffix']}"  # these columns are lowercase
+
+    def data_colname_to_data_keys(self, colname: str) -> SourceCatalogDataKey:
+        colname = colname.lower()
+        value_prefixes = ["mean_", "median_", "biweight_location_"]
+        uncertainty_prefixes = ["std_", "mad_std_", "biweight_scale_"]
+        sep = self.data_key_template_cls.sep
+        if any(colname.startswith(prefix) for prefix in value_prefixes):
+            value_key = "value"
+        elif any(colname.startswith(prefix) for prefix in uncertainty_prefixes):
+            value_key = "uncertainty"
+            for v, u in zip(value_prefixes, uncertainty_prefixes):
+                if colname.startswith(u):
+                    colname = v + colname[len(u):]
+                    break
+        else:
+            assert False, f"Unexpected colname: {colname}"
+        return SourceCatalogDataKey(
+            measurement=f"{self.table_key}{sep}{colname}",
+            value = value_key,
+            epoch = self.epoch_key,
+            )
+
 
 def make_table_key(filepath: Path) -> str:
     _tbl_key_fmt = "{chan}_{kind}{suffix}"
@@ -429,8 +470,7 @@ def aperture_photometry_catalogs(
     output_file = IDFFilename.remake_filepath(
         sci_div_file, 
         parent_path=None, 
-        ext='.ecsv', 
-        suffix=''
+        fileext='.ecsv', 
     )
     
     # Check files and timestamps
@@ -839,19 +879,34 @@ def idf_lightcurve_storage_empty(
     logger.info(f"Loaded superstack catalog: {len(cat_superstack)} sources")
 
    
-    # collect info from superstack catalog, expand for all chans
-    # and input kinds
-    measurement_keys = []
+    sextractor_measurement_keys = []
+
 
     # TODO handle div input measurement keys separately
     chan_names = get_args(ChanT)
     for chan in chan_names:
         for input_kind in ["sci", "sci_clean"]:
-            measurement_keys.extend([key.replace("superstack", f"{chan}_{input_kind}") for key in cat_superstack.measurement_keys])
-    logger.info(f"Use {len(measurement_keys)} measurement keys from all input:\n{measurement_keys}")
+            for colname_key in ["mag_auto", "mag_iso", "mag_aper_1"]:
+                for m_key in cat_superstack.measurement_keys:
+                    if not m_key.endswith(colname_key):
+                        continue
+                    sextractor_measurement_keys.append(m_key.replace("superstack", f"{chan}_{input_kind}"))
+    logger.info(f"add {len(sextractor_measurement_keys)} measurement keys from sextract catalogs")
 
+    # handle div photutils measurement keys separately
+    photutils_measurement_keys = []
+    for chan in chan_names:
+        for area_px in [3, 7, 13, 20]:
+            for n_sig in [3, ]:
+                for stat in ["biweight_location", ]:
+                    key = f"{chan}_sci_div-{stat}_area{area_px}px_sigclip{n_sig}"
+                    photutils_measurement_keys.append(key)
+    logger.info(f"add {len(photutils_measurement_keys)} measurement keys from photutils catalogs")
+    measurement_keys = sextractor_measurement_keys + photutils_measurement_keys
+    logger.debug(f"all measurement keys: {measurement_keys}")
     # value_keys = list(cat_superstack.value_keys)
-    value_keys = ["mag", "magerr"]
+    # value_keys = ["mag", "magerr"]
+    value_keys = ["value", "uncertainty"]
     logger.info(f"Use {len(value_keys)} value keys from all input:\n{value_keys}")
 
     # populate dim_vars from superstack
@@ -927,6 +982,7 @@ def idf_lightcurve_storage_empty(
         "storage_path": AssetIn("idf_lightcurve_storage_empty"),
         "catalog_sci": AssetIn("cat_from_sci"),
         "catalog_clean": AssetIn("cat_from_sci_lac_cleaned"),
+        "catalog_div": AssetIn("aperture_photometry_catalogs"),
     },
     description="Populate lightcurve storage with data from catalogs",
     required_resource_keys={"idf_pipeline_config"}
@@ -936,6 +992,7 @@ def idf_lightcurve_storage_populated(
     storage_path: str,
     catalog_sci: str,
     catalog_clean: str,
+    catalog_div: str,
 ) -> MaterializeResult:
     """Populate lightcurve Zarr storage with data from a specific epoch/channel.
     
@@ -963,7 +1020,8 @@ def idf_lightcurve_storage_populated(
     logger.info(f"Populating storage for {partition_key}")
 
     n_populated = 0
-    for catalog_file in [catalog_sci, catalog_clean]:
+    transform_cls_list = [IDFSExtractorTableTransform, IDFSExtractorTableTransform, IDFPhotUtilsTableTransform]
+    for catalog_file, transform_cls in zip([catalog_sci, catalog_clean, catalog_div], transform_cls_list):
         # Skip if catalog file is empty (upstream failed)
         if not catalog_file:
             logger.warning(f"missing catalog: {catalog_file}")
@@ -972,7 +1030,7 @@ def idf_lightcurve_storage_populated(
         catalog_file = Path(catalog_file)
         logger.info(f"Loading catalog from {catalog_file}")
         tbl = Table.read(catalog_file, format='ascii.ecsv')
-        tbl_transform = IDFSExtractorTableTransform(
+        tbl_transform = transform_cls(
             table_key=make_table_key(catalog_file),
             epoch_key=epoch_key
         )
