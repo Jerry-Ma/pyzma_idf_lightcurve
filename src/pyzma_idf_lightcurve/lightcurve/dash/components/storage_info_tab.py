@@ -37,8 +37,8 @@ def create_storage_info_tab():
                 ),
                 dag.AgGrid(
                     id='epoch-variables-grid',
-                    rowData=[],
                     columnDefs=[],
+                    rowModelType="infinite",
                     defaultColDef={
                         "sortable": True,
                         "filter": True,
@@ -46,8 +46,14 @@ def create_storage_info_tab():
                     },
                     dashGridOptions={
                         "rowSelection": "single",
+                        "rowBuffer": 0,
+                        "cacheBlockSize": 100,
+                        "maxBlocksInCache": 10,  # Increased from 2 to handle more blocks
+                        "infiniteInitialRowCount": 1,  # Show loading state
+                        "maxConcurrentDatasourceRequests": 2,
+                        "cacheOverflowSize": 2,  # Keep extra blocks in memory
                     },
-                    style={"height": "500px", "width": "100%"},
+                    style={"height": "600px", "width": "100%"},
                 )
             ],
             p="md",
@@ -77,18 +83,26 @@ def create_storage_info_tab():
                 ),
                 dag.AgGrid(
                     id='object-variables-grid',
-                    rowData=[],
                     columnDefs=[],
+                    rowModelType="infinite",
                     defaultColDef={
                         "sortable": True,
                         "filter": True,
                         "resizable": True,
+                        "suppressMenu": False,
                     },
                     dashGridOptions={
                         "rowSelection": "multiple",
-                        "rowModelType": "clientSide",
-                        "rowBuffer": 10,
-                        "suppressScrollOnNewData": True,
+                        "rowBuffer": 0,
+                        "cacheBlockSize": 100,
+                        "maxBlocksInCache": 2,
+                        "infiniteInitialRowCount": 1,
+                        "maxConcurrentDatasourceRequests": 2,
+                        "suppressColumnVirtualisation": False,
+                        "suppressRowClickSelection": False,
+                        "enableCellTextSelection": True,
+                        "ensureDomOrder": False,
+                        "animateRows": False,
                     },
                     style={"height": "600px", "width": "100%"},
                 )

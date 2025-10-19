@@ -67,8 +67,8 @@ def viz(
     ] = None,
     *,
     debug: Annotated[
-        bool, typer.Option("--debug", help="Run in debug mode"),
-    ] = False,
+        bool, typer.Option("--debug/--no-debug", help="Run in debug mode with hot reload (default: enabled)"),
+    ] = True,
 ) -> None:
     """Start the interactive Dash v3 lightcurve visualization web application.
     

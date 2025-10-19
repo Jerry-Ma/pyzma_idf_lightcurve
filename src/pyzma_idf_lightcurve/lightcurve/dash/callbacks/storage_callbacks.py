@@ -1,18 +1,21 @@
 """Callbacks for storage loading and management."""
 
+import time
 from pathlib import Path
 from dash import Input, Output, State, callback, no_update
 from dash.exceptions import PreventUpdate
 import dash_mantine_components as dmc
+from dash_iconify import DashIconify
+import pandas as pd
 
 from ...datamodel import LightcurveStorage
-from ..storage_cache import StorageCache
+from ..app import get_storage_cache
 
 
 def register_storage_callbacks(app):
     """Register all storage-related callbacks."""
     
-    @app.callback(
+    @callback(
         [
             Output('storage-path-validation', 'children'),
             Output('storage-mode-select', 'data'),
@@ -137,96 +140,239 @@ def register_storage_callbacks(app):
                 True,
             )
     
-    _register_load_storage_callback(app)
+    _register_background_load_callback(app)
 
 
-def _register_load_storage_callback(app):
-    """Register the load storage callback (internal function)."""
+def _register_background_load_callback(app):
+    """Register background callback for storage loading with native progress tracking."""
     
-    @app.callback(
-        [
+    @callback(
+        output=[
             Output('storage-data', 'data'),
             Output('notifications-container', 'children'),
         ],
-        Input('load-storage-button', 'n_clicks'),
-        [
+        inputs=Input('load-storage-button', 'n_clicks'),
+        state=[
             State('storage-path-input', 'value'),
             State('storage-mode-select', 'value'),
         ],
-        prevent_initial_call=True
+        background=True,
+        running=[
+            # Disable button and show loading state while callback is running
+            (Output('load-storage-button', 'disabled'), True, False),
+            (Output('load-storage-button', 'loading'), True, False),
+        ],
+        progress=[
+            Output('loading-progress', 'value'),
+            Output('loading-status-text', 'children'),
+            Output('loading-detail-text', 'children'),
+        ],
+        progress_default=[0, "", ""],
+        prevent_initial_call=True,
     )
-    def load_storage(n_clicks, storage_path, storage_mode):
-        """Load zarr storage and extract metadata."""
-        # Debug output
-        print("\n" + "-"*80)
-        print(f"load_storage callback triggered:")
-        print(f"  n_clicks: {n_clicks}")
-        print(f"  storage_path: {storage_path!r}")
-        print(f"  storage_mode: {storage_mode!r}")
-        print("-"*80 + "\n")
+    def load_storage_background(set_progress, n_clicks, storage_path, storage_mode):
+        """Load zarr storage in background with real-time progress updates.
         
-        if not n_clicks or not storage_path:
-            print("PreventUpdate: n_clicks or storage_path is empty")
+        This uses Dash's native background callbacks for long-running tasks.
+        Progress is tracked via set_progress() function provided by Dash.
+        
+        Args:
+            set_progress: Function to update progress (value, status, detail)
+            n_clicks: Number of times load button was clicked
+            storage_path: Path to storage directory
+            storage_mode: Either 'read' or 'write'
+        
+        Returns:
+            Tuple of (storage_data dict, notification component)
+        """
+        if not n_clicks:
             raise PreventUpdate
         
+        if not storage_path or not storage_path.strip():
+            set_progress((0, "Error", "Storage path is required"))
+            return (
+                no_update,
+                dmc.Notification(
+                    title="Error",
+                    message="Storage path is required",
+                    color="red",
+                    icon=DashIconify(icon="mdi:alert-circle"),
+                    action="show",
+                )
+            )
+        
         try:
-            # Use storage_path as-is - let LightcurveStorage handle zarr path details
-            storage_path_obj = Path(storage_path)
+            storage_path_obj = Path(storage_path.strip())
             
-            print(f"Storage path: {storage_path_obj}")
+            # Stage 1: Validate path (10%)
+            set_progress((10, "Validating path...", str(storage_path_obj)))
+            time.sleep(0.1)  # Small delay for UI update
             
             if not storage_path_obj.exists():
                 error_msg = f"Storage path does not exist: {storage_path_obj}"
-                print(f"ERROR: {error_msg}")
+                set_progress((0, "Error", error_msg))
                 return (
                     no_update,
                     dmc.Notification(
                         title="Error",
                         message=error_msg,
                         color="red",
+                        icon=DashIconify(icon="mdi:alert-circle"),
                         action="show",
                     )
                 )
             
-            # Load storage - LightcurveStorage will handle zarr path construction
-            print(f"Loading storage in {storage_mode} mode...")
+            # Stage 2: Initialize storage object (30%)
+            set_progress((30, "Initializing storage object...", f"Mode: {storage_mode}"))
             storage = LightcurveStorage(storage_path=storage_path_obj)
+            time.sleep(0.1)
             
+            # Stage 3: Load dataset from zarr (60%)
             if storage_mode == "read":
+                set_progress((60, "Loading dataset for reading...", "Per-object optimization"))
                 storage.load_for_per_object_read()
                 zarr_path = storage.zarr_path_for_read
             else:
+                set_progress((60, "Loading dataset for writing...", "Per-epoch optimization"))
                 storage.load_for_per_epoch_write()
                 zarr_path = storage.zarr_path_for_write
             
-            # Cache the loaded storage object for reuse in other callbacks
-            cache = StorageCache.get_instance()
-            cache.set(storage_path_obj, storage_mode, storage)
-            print(f"Storage loaded and cached: {type(storage)}")
-            print(f"Zarr path: {zarr_path}")
-            
-            # Get dataset info for display
+            # Stage 4: Extract metadata (70%)
+            set_progress((70, "Extracting metadata...", ""))
             ds = storage.dataset
             data_shape = dict(ds.sizes)
-            print(f"Dataset info: shape={data_shape}")
+            n_objects = data_shape.get('object', 0)
+            n_epochs = data_shape.get('epoch', 0)
+            time.sleep(0.1)
             
-            # Prepare data for dcc.Store (must be JSON serializable)
-            # This is the cache key for retrieving storage in other callbacks
+            # Stage 4.5: Pre-compute DataFrames for info tables (80%)
+            set_progress((80, "Pre-computing info tables...", "Building epoch and object DataFrames"))
+            
+            def _make_df_from_dim_vars(dim_name):
+                """Extract 1D variables along a dimension into a DataFrame."""
+                coord_values = ds.coords[dim_name].values
+                data = {dim_name: coord_values}
+                vars_dict = {}
+                for var_name in ds.coords:
+                    vars_dict[var_name] = ds.coords[var_name]
+                for var_name in ds.data_vars:
+                    vars_dict[var_name] = ds[var_name]
+                for var_name, var in vars_dict.items():
+                    if dim_name in var.dims and len(var.dims) == 1:
+                        data[var_name] = var.values
+                return pd.DataFrame(data)
+            
+            print(f"[DEBUG] Pre-computing epoch DataFrame...")
+            epoch_df = _make_df_from_dim_vars('epoch')
+            print(f"[DEBUG]   Epoch DF: {len(epoch_df)} rows, {len(epoch_df.columns)} columns")
+            
+            print(f"[DEBUG] Pre-computing object DataFrame...")
+            object_df = _make_df_from_dim_vars('object')
+            print(f"[DEBUG]   Object DF: {len(object_df)} rows, {len(object_df.columns)} columns")
+            
+            time.sleep(0.1)
+            
+            # Stage 5: Verify Dask array optimization (85%)
+            set_progress((85, "Verifying data access optimization...", "Checking Dask array configuration"))
+            
+            # Get the lightcurves DataArray
+            lc_data_array = storage.lightcurves
+            
+            print(f"\n[DEBUG] Analyzing lightcurves data access:")
+            print(f"  Array shape: {lc_data_array.shape}")
+            print(f"  Array dtype: {lc_data_array.dtype}")
+            print(f"  Array size: {lc_data_array.nbytes / (1024**3):.2f} GB")
+            
+            # Check if it's already a Dask array (which it should be from zarr loading)
+            is_dask = hasattr(lc_data_array.data, 'dask')
+            print(f"  Is Dask array: {is_dask}")
+            
+            if is_dask:
+                # Already optimized with Dask! Just verify chunking is good
+                chunks = lc_data_array.chunks
+                print(f"  Current chunks: {chunks}")
+                
+                # Check if chunking looks good
+                # For .sel() operations on objects, we want reasonable object chunks
+                if chunks:
+                    object_chunk_size = chunks[0][0] if isinstance(chunks[0], tuple) else chunks[0]
+                    total_objects = lc_data_array.shape[0]
+                    print(f"  Object dimension: {object_chunk_size} per chunk (total: {total_objects})")
+                    
+                    if object_chunk_size == total_objects:
+                        print(f"  ⚠️  Warning: Single chunk for all objects - may cause memory issues")
+                        print(f"  Consider rechunking the zarr store for better performance")
+                    else:
+                        print(f"  ✓ Good chunking detected - {total_objects // object_chunk_size} chunks for objects")
+                
+                print(f"\n  Storage is already Dask-optimized:")
+                print(f"    ✓ Data stays on disk (zarr-backed)")
+                print(f"    ✓ Automatic chunk caching by Dask")
+                print(f"    ✓ Efficient .sel() operations")
+                print(f"    ✓ Multiprocessing-safe access")
+            else:
+                print(f"  ⚠️  Not a Dask array - using direct zarr access")
+                print(f"  Consider loading with dask chunks for better performance")
+            
+            time.sleep(0.1)
+            
+            # Stage 6: Cache storage and DataFrames in diskcache (90%)
+            set_progress((90, "Caching storage and tables...", "Saving to disk cache"))
+            cache = get_storage_cache()
+            cache_key_storage = f"storage:{storage_path_obj}:{storage_mode}"
+            cache_key_epoch_df = f"epoch_df:{storage_path_obj}:{storage_mode}"
+            cache_key_object_df = f"object_df:{storage_path_obj}:{storage_mode}"
+            
+            print(f"\n[DEBUG] Background callback caching storage and DataFrames:")
+            print(f"  storage_path_obj: {storage_path_obj} (type: {type(storage_path_obj)})")
+            print(f"  storage_mode: {storage_mode}")
+            print(f"  cache_key_storage: {cache_key_storage}")
+            print(f"  cache_key_epoch_df: {cache_key_epoch_df}")
+            print(f"  cache_key_object_df: {cache_key_object_df}")
+            print(f"  cache directory: {cache.directory}")
+            print(f"  storage type: {type(storage)}")
+            print(f"  epoch_df shape: {epoch_df.shape}")
+            print(f"  object_df shape: {object_df.shape}")
+            
+            cache.set(cache_key_storage, storage)
+            cache.set(cache_key_epoch_df, epoch_df)
+            cache.set(cache_key_object_df, object_df)
+            
+            # Verify caching
+            test_storage = cache.get(cache_key_storage)
+            test_epoch = cache.get(cache_key_epoch_df)
+            test_object = cache.get(cache_key_object_df)
+            print(f"  Cache verification:")
+            print(f"    storage: {test_storage is not None}")
+            print(f"    epoch_df: {test_epoch is not None} (shape: {test_epoch.shape if test_epoch is not None else 'N/A'})")
+            print(f"    object_df: {test_object is not None} (shape: {test_object.shape if test_object is not None else 'N/A'})")
+            print()
+            
+            time.sleep(0.1)
+            
+            # Stage 7: Complete (100%)
+            set_progress((
+                100,
+                "✓ Loading complete!",
+                f"Loaded {n_objects:,} objects × {n_epochs:,} epochs (Dask-optimized lazy access)"
+            ))
+            
+            # Prepare storage data for dcc.Store (must be JSON serializable)
             storage_data = {
                 'storage_path': str(storage_path_obj),
                 'mode': storage_mode,
+                'n_objects': n_objects,
+                'n_epochs': n_epochs,
+                'timestamp': time.time(),
             }
-            
-            print(f"✓ Successfully loaded storage from {zarr_path}")
-            print(f"  Data shape: {data_shape}")
-            print(f"  Cache key: {storage_path_obj}:{storage_mode}")
             
             return (
                 storage_data,
                 dmc.Notification(
-                    title="Success",
-                    message=f"Loaded storage from {zarr_path}",
+                    title="✓ Storage Loaded Successfully",
+                    message=f"Loaded {n_objects:,} objects × {n_epochs:,} epochs from {zarr_path.name}",
                     color="green",
+                    icon=DashIconify(icon="mdi:check-circle"),
                     action="show",
                 )
             )
@@ -235,17 +381,20 @@ def _register_load_storage_callback(app):
             # Print full traceback for debugging
             import traceback
             print("\n" + "="*80)
-            print("ERROR in load_storage callback:")
+            print("ERROR in load_storage_background:")
             print("="*80)
             traceback.print_exc()
             print("="*80 + "\n")
             
+            set_progress((0, "✗ Error occurred", str(e)))
+            
             return (
                 no_update,
                 dmc.Notification(
-                    title="Error",
+                    title="✗ Loading Failed",
                     message=f"Failed to load storage: {str(e)}",
                     color="red",
+                    icon=DashIconify(icon="mdi:alert-circle"),
                     action="show",
                 )
             )

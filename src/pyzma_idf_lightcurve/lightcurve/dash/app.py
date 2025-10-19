@@ -2,8 +2,10 @@
 
 import time
 import logging
+from pathlib import Path
+import diskcache
 import dash
-from dash import html, dcc
+from dash import html, dcc, DiskcacheManager
 import dash_mantine_components as dmc
 
 from .components.storage_loader import create_storage_loader
@@ -19,6 +21,18 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# Module-level cache for storage objects (shared across processes via disk)
+_storage_cache = None
+
+def get_storage_cache():
+    """Get the shared storage cache instance."""
+    global _storage_cache
+    if _storage_cache is None:
+        cache_dir = Path.cwd() / ".dash_cache"
+        cache_dir.mkdir(exist_ok=True)
+        _storage_cache = diskcache.Cache(str(cache_dir))
+    return _storage_cache
+
 def create_app(initial_storage_path=None):
     """Create and configure the Dash v3 application.
     
@@ -31,11 +45,17 @@ def create_app(initial_storage_path=None):
     start_time = time.time()
     logger.info("Creating Dash application...")
     
+    # Setup background callback manager for long-running tasks
+    cache = get_storage_cache()
+    background_callback_manager = DiskcacheManager(cache)
+    logger.info(f"Background callback cache: {cache.directory}")
+    
     app = dash.Dash(
         __name__,
         external_stylesheets=dmc.styles.ALL,
         suppress_callback_exceptions=True,
-        title="IDF Lightcurve Viewer"
+        title="IDF Lightcurve Viewer",
+        background_callback_manager=background_callback_manager,
     )
     logger.info(f"Dash app initialized ({time.time() - start_time:.2f}s)")
     

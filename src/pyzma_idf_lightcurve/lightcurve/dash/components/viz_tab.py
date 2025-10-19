@@ -17,21 +17,50 @@ def create_viz_tab():
                 dmc.Title("Lightcurve Controls", order=3, mb="md"),
                 
                 dmc.Grid([
-                    # Object selection
+                    # Object query filter
                     dmc.GridCol(
                         [
-                            dmc.MultiSelect(
-                                id='object-keys-select',
-                                label="Select Objects (max 20)",
-                                placeholder="Choose objects to visualize",
+                            dmc.TextInput(
+                                id='object-query-input',
+                                label="Object Query Filter",
+                                placeholder='e.g., object in ["I20000", "I24000"] or ra > 180',
+                                description="Pandas query syntax for selecting objects (leave empty to plot all)",
+                            ),
+                            html.Div(id='object-query-validation'),
+                        ],
+                        span=6
+                    ),
+                    
+                    # Query history dropdown
+                    dmc.GridCol(
+                        [
+                            dmc.Select(
+                                id='query-history-select',
+                                label="Query History",
+                                placeholder="Load from history",
                                 data=[],
-                                value=[],
-                                maxValues=20,
                                 searchable=True,
                                 clearable=True,
                             )
                         ],
-                        span=6
+                        span=4
+                    ),
+                    
+                    # Random objects button
+                    dmc.GridCol(
+                        [
+                            html.Div(
+                                dmc.Button(
+                                    "Random 5 Objects",
+                                    id='random-objects-button',
+                                    variant="light",
+                                    color="blue",
+                                    fullWidth=True,
+                                ),
+                                style={"paddingTop": "25px"}
+                            )
+                        ],
+                        span=2
                     ),
                     
                     # Measurement selection
@@ -47,7 +76,7 @@ def create_viz_tab():
                                 clearable=True,
                             )
                         ],
-                        span=6
+                        span=5
                     ),
                     
                     # X-axis variable
@@ -62,21 +91,23 @@ def create_viz_tab():
                                 clearable=False,
                             )
                         ],
-                        span=4
+                        span=2
                     ),
                     
-                    # Query filter
+                    # Max objects limit
                     dmc.GridCol(
                         [
-                            dmc.TextInput(
-                                id='query-input',
-                                label="Query Filter (optional)",
-                                placeholder="e.g., ra > 180 & dec < 30",
-                                description="Pandas query syntax for filtering objects",
-                            ),
-                            html.Div(id='query-validation'),
+                            dmc.NumberInput(
+                                id='max-objects-input',
+                                label="Max Objects to Plot",
+                                description="Limit number of objects (default: 20)",
+                                value=20,
+                                min=1,
+                                max=100,
+                                step=1,
+                            )
                         ],
-                        span=5
+                        span=2
                     ),
                     
                     # Plot button
@@ -94,7 +125,7 @@ def create_viz_tab():
                                 style={"paddingTop": "25px"}
                             )
                         ],
-                        span=3
+                        span=1
                     ),
                 ]),
             ],

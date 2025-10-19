@@ -1,7 +1,8 @@
 """Storage loader component for selecting and loading zarr storage."""
 
 import dash_mantine_components as dmc
-from dash import html
+from dash import html, dcc
+from dash_iconify import DashIconify
 
 
 def create_storage_loader(initial_path=None):
@@ -63,6 +64,7 @@ def create_storage_loader(initial_path=None):
                             variant="filled",
                             color="blue",
                             fullWidth=True,
+                            leftSection=DashIconify(icon="mdi:database-import"),
                         ),
                         style={"paddingTop": "25px"}
                     )
@@ -73,4 +75,18 @@ def create_storage_loader(initial_path=None):
         
         # Path validation feedback
         html.Div(id='storage-path-validation'),
+        
+        # Progress display (updated by background callback)
+        dmc.Stack([
+            dmc.Text(id='loading-status-text', size="sm", fw=500, c="dimmed", mt="md"),
+            dmc.Progress(
+                id='loading-progress',
+                value=0,
+                striped=True,
+                animated=True,
+                color="blue",
+                size="lg",
+            ),
+            dmc.Text(id='loading-detail-text', size="xs", c="dimmed"),
+        ], gap="xs"),
     ])
