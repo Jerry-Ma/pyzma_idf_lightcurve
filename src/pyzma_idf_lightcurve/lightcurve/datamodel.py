@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Literal
 
 import numpy as np
+import pandas as pd
 import xarray as xr
 import zarr
 from astropy.table import Table
@@ -585,3 +586,37 @@ class LightcurveStorage:
     def append_epoch_data(self, epoch_key: str, catalog: Table, measurement_keys: list[str]) -> int:
         """Append data for a new epoch to existing zarr storage using region writes."""
         return NotImplemented
+
+    def save_metadata_table(self, name: str, df: pd.DataFrame) -> Path:
+        """Save metadata table as Parquet file in storage root.
+        
+        Args:
+            name: Table name (e.g., 'epoch', 'object')
+            df: DataFrame to save
+            
+        Returns:
+            Path to saved Parquet file
+        """
+        parquet_path = self.storage_path / f"{name}_table.parquet"
+        df.to_parquet(parquet_path, index=False)
+        logger.info(f"Saved {name} table to {parquet_path} ({len(df)} rows, {len(df.columns)} columns)")
+        return parquet_path
+
+    def load_metadata_table(self, name: str) -> pd.DataFrame:
+        """Load metadata table from Parquet file in storage root.
+        
+        Args:
+            name: Table name (e.g., 'epoch', 'object')
+            
+        Returns:
+            DataFrame loaded from Parquet file
+            
+        Raises:
+            FileNotFoundError: If Parquet file does not exist
+        """
+        parquet_path = self.storage_path / f"{name}_table.parquet"
+        if not parquet_path.exists():
+            raise FileNotFoundError(f"Metadata table not found: {parquet_path}")
+        df = pd.read_parquet(parquet_path)
+        logger.info(f"Loaded {name} table from {parquet_path} ({len(df)} rows, {len(df.columns)} columns)")
+        return df

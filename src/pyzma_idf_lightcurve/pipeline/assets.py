@@ -886,7 +886,7 @@ def idf_lightcurve_storage_empty(
     chan_names = get_args(ChanT)
     for chan in chan_names:
         for input_kind in ["sci", "sci_clean"]:
-            for colname_key in ["mag_auto", "mag_iso", "mag_aper_1"]:
+            for colname_key in ["mag_auto", "mag_iso", "mag_aper_1", "mag_aper_2"]:
                 for m_key in cat_superstack.measurement_keys:
                     if not m_key.endswith(colname_key):
                         continue
@@ -898,7 +898,7 @@ def idf_lightcurve_storage_empty(
     for chan in chan_names:
         for area_px in [3, 7, 13, 20]:
             for n_sig in [3, ]:
-                for stat in ["biweight_location", ]:
+                for stat in ["biweight_location", "median"]:
                     key = f"{chan}_sci_div-{stat}_area{area_px}px_sigclip{n_sig}"
                     photutils_measurement_keys.append(key)
     logger.info(f"add {len(photutils_measurement_keys)} measurement keys from photutils catalogs")
@@ -908,12 +908,6 @@ def idf_lightcurve_storage_empty(
     # value_keys = ["mag", "magerr"]
     value_keys = ["value", "uncertainty"]
     logger.info(f"Use {len(value_keys)} value keys from all input:\n{value_keys}")
-
-    # populate dim_vars from superstack
-    dim_vars_object = {}
-    for colname in cat_superstack.table.colnames:
-        logger.info(f"add {colname} to dim_vars_object")
-        dim_vars_object[f"superstack_{colname}".lower()] = cat_superstack.get_table_data(colname)
 
     # Load AOR info table to get list of temporal grouping keys
     aor_info_path = Path(config.aor_info_table)
@@ -928,17 +922,7 @@ def idf_lightcurve_storage_empty(
     # Extract epoch keys - use group_name from the table
     epoch_keys = [str(group_name) for group_name in tbl_aors['group_name']]
     logger.info(f"Found {len(epoch_keys)} epochs from info table (sorted by reqkey)")
-    # populate dim_vars from aors table
-    dim_vars_epoch = {}
-    for colname in tbl_aors.colnames:
-        coldata = tbl_aors[colname]
-
-        if isinstance(coldata, Time):
-            coldata = coldata.datetime64
-        else:
-            coldata = coldata.data
-        logger.info(f"add {colname} to dim_vars_object")
-        dim_vars_epoch[f"epoch_{colname}".lower()] = coldata
+    
     # Create storage with static configuration
     logger.info(f"Creating Zarr storage with {len(epoch_keys)} epochs and {len(measurement_keys)} measurement keys")
     storage = LightcurveStorage(
@@ -950,11 +934,26 @@ def idf_lightcurve_storage_empty(
         measurement_keys=measurement_keys,
         value_keys=value_keys,
         epoch_keys=epoch_keys,
-        dim_vars={
-            "object": dim_vars_object,
-            "epoch": dim_vars_epoch,
-        },
     )
+    
+    # Save metadata tables as Parquet files
+    logger.info("Converting metadata tables to Parquet format...")
+    
+    # Convert superstack catalog to pandas DataFrame with prefixed column names
+    object_df = cat_superstack.table.to_pandas()
+    object_df.columns = [f"superstack_{col}".lower() for col in object_df.columns]
+    # Add 'object' column from catalog object keys for Dash compatibility
+    object_df.insert(0, 'object', list(cat_superstack.object_keys))
+    storage.save_metadata_table('object', object_df)
+    logger.info(f"Saved object metadata table: {len(object_df)} rows, {len(object_df.columns)} columns")
+    
+    # Convert AOR info table to pandas DataFrame with prefixed column names
+    epoch_df = tbl_aors.to_pandas()
+    epoch_df.columns = [f"epoch_{col}".lower() for col in epoch_df.columns]
+    # Add 'epoch' column from epoch_keys for Dash compatibility
+    epoch_df.insert(0, 'epoch', epoch_keys)
+    storage.save_metadata_table('epoch', epoch_df)
+    logger.info(f"Saved epoch metadata table: {len(epoch_df)} rows, {len(epoch_df.columns)} columns")
     
     logger.info("✓ Storage created successfully")
     logger.info(f"  • Path: {storage_path}")

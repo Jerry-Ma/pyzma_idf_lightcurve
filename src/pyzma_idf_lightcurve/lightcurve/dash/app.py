@@ -11,6 +11,8 @@ import dash_mantine_components as dmc
 from .components.storage_loader import create_storage_loader
 from .components.storage_info_tab import create_storage_info_tab
 from .components.viz_tab import create_viz_tab
+from .components.object_stats_tab import create_object_stats_tab
+from .components.image_tab import create_image_tab
 
 # Configure logging
 logging.basicConfig(
@@ -66,24 +68,44 @@ def create_app(initial_storage_path=None):
         dcc.Store(id='selected-objects', storage_type='memory', data=[]),
         
         dmc.Container([
-            dmc.Title("IDF Lightcurve Viewer", order=1, mb="md"),
-            dmc.Text("Visualize lightcurves from the Infrared Deep Field",
-                    c="gray", size="sm", mb="xl"),
+            dmc.Group([
+                html.Div([
+                    dmc.Title("IDF Lightcurve Viewer", order=1, mb=0),
+                    dmc.Text("Visualize lightcurves from the Infrared Deep Field",
+                            c="gray", size="sm"),
+                ]),
+                dmc.Button(
+                    "📂 Load Storage",
+                    id="open-storage-modal-button",
+                    variant="filled",
+                    color="blue",
+                    size="lg",
+                ),
+            ], justify="space-between", align="center", mb="xl"),
         ], fluid=True, p="md"),
         
-        dmc.Container([
-            dmc.Paper(create_storage_loader(initial_storage_path), shadow="sm", p="md", mb="md", withBorder=True)
-        ], fluid=True, px="md"),
+        # Storage loader modal dialog
+        dmc.Modal(
+            id="storage-modal",
+            title="Load Storage",
+            children=create_storage_loader(initial_storage_path),
+            size="xl",
+            zIndex=10000,
+        ),
         
         dmc.Container([
             dmc.Tabs([
                 dmc.TabsList([
-                    dmc.TabsTab("Storage Info", value="info"),
                     dmc.TabsTab("Visualization", value="viz"),
+                    dmc.TabsTab("Object Stats", value="stats"),
+                    dmc.TabsTab("Image View", value="image"),
+                    dmc.TabsTab("Storage Info", value="info"),
                 ]),
-                dmc.TabsPanel(create_storage_info_tab(), value="info"),
                 dmc.TabsPanel(create_viz_tab(), value="viz"),
-            ], id="main-tabs", value="info")
+                dmc.TabsPanel(create_object_stats_tab(), value="stats"),
+                dmc.TabsPanel(create_image_tab(), value="image"),
+                dmc.TabsPanel(create_storage_info_tab(), value="info"),
+            ], id="main-tabs", value="viz")
         ], fluid=True, px="md"),
         
         html.Div(id='notifications-container'),

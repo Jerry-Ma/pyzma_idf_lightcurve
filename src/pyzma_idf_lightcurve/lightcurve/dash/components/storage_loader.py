@@ -16,8 +16,6 @@ def create_storage_loader(initial_path=None):
         dmc component with file path input, read/write selector, and load button.
     """
     return html.Div([
-        dmc.Title("Load Storage", order=3, mb="sm"),
-        
         dmc.Grid([
             # File path input
             dmc.GridCol(

@@ -2,7 +2,7 @@
 
 import time
 from pathlib import Path
-from dash import Input, Output, State, callback, no_update
+from dash import Input, Output, State, no_update
 from dash.exceptions import PreventUpdate
 import dash_mantine_components as dmc
 from dash_iconify import DashIconify
@@ -15,7 +15,32 @@ from ..app import get_storage_cache
 def register_storage_callbacks(app):
     """Register all storage-related callbacks."""
     
-    @callback(
+    @app.callback(
+        Output('storage-modal', 'opened'),
+        [
+            Input('open-storage-modal-button', 'n_clicks'),
+            Input('storage-data', 'data'),
+        ],
+        State('storage-modal', 'opened'),
+        prevent_initial_call=True
+    )
+    def toggle_storage_modal(open_clicks, storage_data, is_open):
+        """Open/close storage modal. Close when storage is loaded."""
+        from dash import ctx
+        
+        if not ctx.triggered:
+            raise PreventUpdate
+        
+        trigger_id = ctx.triggered[0]['prop_id'].split('.')[0]
+        
+        if trigger_id == 'open-storage-modal-button':
+            return True  # Open modal
+        elif trigger_id == 'storage-data':
+            return False  # Close modal after data loads
+        
+        return is_open
+    
+    @app.callback(
         [
             Output('storage-path-validation', 'children'),
             Output('storage-mode-select', 'data'),
@@ -146,7 +171,7 @@ def register_storage_callbacks(app):
 def _register_background_load_callback(app):
     """Register background callback for storage loading with native progress tracking."""
     
-    @callback(
+    @app.callback(
         output=[
             Output('storage-data', 'data'),
             Output('notifications-container', 'children'),
@@ -246,29 +271,68 @@ def _register_background_load_callback(app):
             time.sleep(0.1)
             
             # Stage 4.5: Pre-compute DataFrames for info tables (80%)
-            set_progress((80, "Pre-computing info tables...", "Building epoch and object DataFrames"))
+            set_progress((80, "Pre-computing info tables...", "Loading epoch and object metadata"))
             
-            def _make_df_from_dim_vars(dim_name):
-                """Extract 1D variables along a dimension into a DataFrame."""
-                coord_values = ds.coords[dim_name].values
-                data = {dim_name: coord_values}
-                vars_dict = {}
-                for var_name in ds.coords:
-                    vars_dict[var_name] = ds.coords[var_name]
-                for var_name in ds.data_vars:
-                    vars_dict[var_name] = ds[var_name]
-                for var_name, var in vars_dict.items():
-                    if dim_name in var.dims and len(var.dims) == 1:
-                        data[var_name] = var.values
-                return pd.DataFrame(data)
+            # Try to load from Parquet files first (fast path), fall back to Zarr (slow path)
+            epoch_df = None
+            object_df = None
             
-            print(f"[DEBUG] Pre-computing epoch DataFrame...")
-            epoch_df = _make_df_from_dim_vars('epoch')
-            print(f"[DEBUG]   Epoch DF: {len(epoch_df)} rows, {len(epoch_df.columns)} columns")
-            
-            print(f"[DEBUG] Pre-computing object DataFrame...")
-            object_df = _make_df_from_dim_vars('object')
-            print(f"[DEBUG]   Object DF: {len(object_df)} rows, {len(object_df.columns)} columns")
+            try:
+                # Fast path: Load from Parquet files (0.2s vs 235s for Zarr)
+                print(f"[DEBUG] Attempting to load metadata from Parquet files...")
+                epoch_df = storage.load_metadata_table('epoch')
+                object_df = storage.load_metadata_table('object')
+                print(f"[DEBUG] ✓ Loaded from Parquet (fast path)")
+                print(f"[DEBUG]   Epoch DF: {len(epoch_df)} rows, {len(epoch_df.columns)} columns")
+                print(f"[DEBUG]   Object DF: {len(object_df)} rows, {len(object_df.columns)} columns")
+                
+                # Try to load object_stats table and merge with object_df
+                try:
+                    # Try both naming conventions: object_stats.parquet and object_stats_table.parquet
+                    stats_path = storage.storage_path / 'object_stats.parquet'
+                    if not stats_path.exists():
+                        # Fall back to _table suffix naming
+                        object_stats_df = storage.load_metadata_table('object_stats')
+                    else:
+                        object_stats_df = pd.read_parquet(stats_path)
+                        
+                    print(f"[DEBUG]   Object Stats DF: {len(object_stats_df)} rows, {len(object_stats_df.columns)} columns")
+                    
+                    # Merge object_df with object_stats_df on 'object' column
+                    # Use left join to keep all objects even if some don't have stats
+                    object_df = object_df.merge(object_stats_df, on='object', how='left')
+                    print(f"[DEBUG] ✓ Merged object_stats into object table")
+                    print(f"[DEBUG]   Merged Object DF: {len(object_df)} rows, {len(object_df.columns)} columns")
+                except FileNotFoundError:
+                    print(f"[DEBUG] ⚠️  object_stats table not found - proceeding without stats columns")
+                    print(f"[DEBUG]   Run object stats computation to enable filtering by n_epochs")
+            except FileNotFoundError:
+                # Slow path: Build from Zarr data variables (backward compatibility)
+                print(f"[DEBUG] Parquet files not found, building from Zarr (slow path)...")
+                set_progress((80, "Pre-computing info tables...", "Building from Zarr (this may take a few minutes)"))
+                
+                def _make_df_from_dim_vars(dim_name):
+                    """Extract 1D variables along a dimension into a DataFrame."""
+                    coord_values = ds.coords[dim_name].values
+                    data = {dim_name: coord_values}
+                    vars_dict = {}
+                    for var_name in ds.coords:
+                        vars_dict[var_name] = ds.coords[var_name]
+                    for var_name in ds.data_vars:
+                        vars_dict[var_name] = ds[var_name]
+                    for var_name, var in vars_dict.items():
+                        if dim_name in var.dims and len(var.dims) == 1:
+                            data[var_name] = var.values
+                    return pd.DataFrame(data)
+                
+                print(f"[DEBUG] Building epoch DataFrame from Zarr...")
+                epoch_df = _make_df_from_dim_vars('epoch')
+                print(f"[DEBUG]   Epoch DF: {len(epoch_df)} rows, {len(epoch_df.columns)} columns")
+                
+                print(f"[DEBUG] Building object DataFrame from Zarr...")
+                object_df = _make_df_from_dim_vars('object')
+                print(f"[DEBUG]   Object DF: {len(object_df)} rows, {len(object_df.columns)} columns")
+                print(f"[DEBUG] ⚠️  Consider exporting metadata to Parquet for 1000x faster loading")
             
             time.sleep(0.1)
             

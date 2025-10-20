@@ -2,6 +2,7 @@
 
 import dash_mantine_components as dmc
 from dash import html, dcc
+import dash_ag_grid as dag
 
 
 def create_viz_tab():
@@ -11,61 +12,61 @@ def create_viz_tab():
         dmc component with lightcurve controls, plots, and optional image display.
     """
     return html.Div([
-        # Control panel
-        dmc.Paper(
-            [
-                dmc.Title("Lightcurve Controls", order=3, mb="md"),
-                
-                dmc.Grid([
-                    # Object query filter
-                    dmc.GridCol(
+        # Store for current plot state (which object index is displayed)
+        dcc.Store(id='current-plot-index', data=0),
+        dcc.Store(id='filtered-object-list', data=[]),
+        dcc.Store(id='query-is-valid', data=False),  # Store validation state
+        dcc.Store(id='autocomplete-options', data=[]),  # Store autocomplete options
+        
+        # Main layout: Left column (controls) | Right column (plot)
+        dmc.Grid([
+            # Left column: All controls and navigator
+            dmc.GridCol([
+                dmc.Stack([
+                    # Lightcurve Controls section
+                    dmc.Paper(
                         [
-                            dmc.TextInput(
-                                id='object-query-input',
-                                label="Object Query Filter",
-                                placeholder='e.g., object in ["I20000", "I24000"] or ra > 180',
-                                description="Pandas query syntax for selecting objects (leave empty to plot all)",
-                            ),
-                            html.Div(id='object-query-validation'),
-                        ],
-                        span=6
-                    ),
-                    
-                    # Query history dropdown
-                    dmc.GridCol(
-                        [
-                            dmc.Select(
-                                id='query-history-select',
-                                label="Query History",
-                                placeholder="Load from history",
-                                data=[],
-                                searchable=True,
-                                clearable=True,
-                            )
-                        ],
-                        span=4
-                    ),
-                    
-                    # Random objects button
-                    dmc.GridCol(
-                        [
-                            html.Div(
-                                dmc.Button(
-                                    "Random 5 Objects",
-                                    id='random-objects-button',
-                                    variant="light",
-                                    color="blue",
-                                    fullWidth=True,
+                            dmc.Title("Lightcurve Controls", order=3, mb="md"),
+                            
+                            # Object query filter - full width
+                            html.Div([
+                                dmc.Textarea(
+                                    id='object-query-input',
+                                    label="Object Query Filter",
+                                    placeholder='e.g., n_epochs_valid_all > 900 (Press Enter to update)',
+                                    value='n_epochs_valid_all > 900',
+                                    minRows=2,
+                                    maxRows=2,
+                                    description="Query filter (required). Press Enter to update table.",
+                                    style={'width': '100%'},
                                 ),
-                                style={"paddingTop": "25px"}
-                            )
-                        ],
-                        span=2
-                    ),
-                    
-                    # Measurement selection
-                    dmc.GridCol(
-                        [
+                            ], id='query-input-wrapper'),
+                            
+                            # Update button
+                            dmc.Button(
+                                "Update Table",
+                                id='update-table-button',
+                                variant="filled",
+                                color="green",
+                                disabled=True,
+                                mt="xs",
+                            ),
+                            
+                            html.Div(id='object-query-validation'),
+                            html.Div(id='object-count-feedback'),  # Feedback for selection count
+                            
+                            # X-axis variable selection
+                            dmc.Select(
+                                id='x-axis-select',
+                                label="X-Axis Variable",
+                                placeholder="Choose time variable",
+                                data=[],
+                                value=None,
+                                clearable=False,
+                                mt="md",
+                            ),
+                            
+                            # Measurement selection
                             dmc.MultiSelect(
                                 id='measurement-keys-select',
                                 label="Select Measurements",
@@ -74,84 +75,75 @@ def create_viz_tab():
                                 value=[],
                                 searchable=True,
                                 clearable=True,
-                            )
+                                mt="md",
+                            ),
                         ],
-                        span=5
+                        p="md",
+                        mb="md",
+                        withBorder=True
                     ),
                     
-                    # X-axis variable
-                    dmc.GridCol(
+                    # Object Navigator section
+                    dmc.Paper(
                         [
-                            dmc.Select(
-                                id='x-axis-select',
-                                label="X-Axis Variable",
-                                placeholder="Choose time variable",
-                                data=[],
-                                value="epoch_mjd",
-                                clearable=False,
-                            )
+                            dmc.Title("Object Navigator", order=4, mb="sm"),
+                            
+                            # Navigation buttons
+                            dmc.Group([
+                                dmc.Button("◄◄ -5", id="nav-prev5-button", size="xs", variant="light", color="blue"),
+                                dmc.Button("◄◄ -2", id="nav-prev2-button", size="xs", variant="light", color="blue"),
+                                dmc.Button("◄ -1", id="nav-prev1-button", size="xs", variant="light", color="blue"),
+                                dmc.Button("+1 ►", id="nav-next1-button", size="xs", variant="light", color="green"),
+                                dmc.Button("+2 ►►", id="nav-next2-button", size="xs", variant="light", color="green"),
+                                dmc.Button("+5 ►►", id="nav-next5-button", size="xs", variant="light", color="green"),
+                            ], gap="xs", mb="sm"),
+                            
+                            # Object table with AG Grid (sortable, filterable)
+                            dag.AgGrid(
+                                id="object-table",
+                                columnDefs=[
+                                    {"field": "#", "flex": 1, "minWidth": 50, "sortable": True, "checkboxSelection": True, "headerCheckboxSelection": True},
+                                    {"field": "Object", "flex": 2, "minWidth": 100, "sortable": True},
+                                    {"field": "Mag", "flex": 1, "minWidth": 60, "sortable": True},
+                                    {"field": "MagErr", "flex": 1, "minWidth": 60, "sortable": True},
+                                ],
+                                rowData=[],
+                                defaultColDef={"sortable": True, "filter": True, "resizable": True},
+                                dashGridOptions={
+                                    "rowSelection": "multiple",
+                                    "animateRows": True,
+                                    "pagination": False,
+                                    "domLayout": "normal",
+                                },
+                                style={"height": "1200px", "width": "100%"},
+                            ),
                         ],
-                        span=2
+                        p="md",
+                        withBorder=True
                     ),
-                    
-                    # Max objects limit
-                    dmc.GridCol(
-                        [
-                            dmc.NumberInput(
-                                id='max-objects-input',
-                                label="Max Objects to Plot",
-                                description="Limit number of objects (default: 20)",
-                                value=20,
-                                min=1,
-                                max=100,
-                                step=1,
-                            )
-                        ],
-                        span=2
-                    ),
-                    
-                    # Plot button
-                    dmc.GridCol(
-                        [
-                            html.Div(
-                                dmc.Button(
-                                    "Generate Plots",
-                                    id='generate-plots-button',
-                                    variant="filled",
-                                    color="green",
-                                    fullWidth=True,
-                                    disabled=True,
-                                ),
-                                style={"paddingTop": "25px"}
-                            )
-                        ],
-                        span=1
-                    ),
-                ]),
-            ],
-            p="md",
-            mb="md",
-            withBorder=True
-        ),
-        
-        # Plot display area
-        dmc.Paper(
-            [
-                dcc.Graph(
-                    id='lightcurve-plot',
-                    figure={},
-                    config={
-                        'displayModeBar': True,
-                        'displaylogo': False,
-                        'modeBarButtonsToRemove': ['lasso2d', 'select2d'],
-                    },
-                    style={"height": "800px"}
-                )
-            ],
-            p="md",
-            mb="md",
-            withBorder=True
-        ),
+                ], gap="sm"),
+            ], span=3),
+            
+            # Right column: Plot area
+            dmc.GridCol([
+                dmc.Paper(
+                    [
+                        dcc.Graph(
+                            id='lightcurve-plot',
+                            figure={},
+                            config={
+                                'displayModeBar': True,
+                                'displaylogo': False,
+                                'modeBarButtonsToRemove': ['lasso2d', 'select2d'],
+                            },
+                            style={"height": "2400px"}  # Large height for detailed multi-object plots
+                        )
+                    ],
+                    p="md",
+                    withBorder=True
+                ),
+            ], span=9),
+        ]),
         
         # Image viewer section (optional, expandable)
         dmc.Accordion(

@@ -111,6 +111,9 @@ def _register_image_display_callback(app):
             Input('image-norm-select', 'value'),
             Input('image-stretch-slider', 'value'),
             Input('image-cmap-select', 'value'),
+            Input('show-all-objects-toggle', 'checked'),
+            Input('show-selected-objects-toggle', 'checked'),
+            Input('marker-size-input', 'value'),
             Input('selected-objects', 'data'),
         ],
         [
@@ -124,6 +127,9 @@ def _register_image_display_callback(app):
         norm_type,
         stretch_percentiles,
         colormap,
+        show_all_objects,
+        show_selected_objects,
+        marker_size,
         selected_objects,
         image_path,
         storage_data
@@ -154,8 +160,8 @@ def _register_image_display_callback(app):
                 colorscale=colormap
             )
             
-            # Add source markers if storage is loaded
-            if storage_data and selected_objects:
+            # Add source markers if storage is loaded and toggles are on
+            if storage_data and (show_all_objects or show_selected_objects):
                 try:
                     # Retrieve storage from cache
                     storage_path = Path(storage_data.get('storage_path'))
@@ -173,26 +179,74 @@ def _register_image_display_callback(app):
                     else:
                         print(f"[INFO] Retrieved storage from cache for image (mode={mode})")
                     
-                    ds = storage.ds
+                    ds = storage.dataset
+                    
+                    # Debug: Print what we have
+                    print(f"[DEBUG] Storage loaded for image overlay:")
+                    print(f"  Dataset type: {type(ds)}")
+                    print(f"  Available data_vars: {list(ds.data_vars.keys())}")
+                    print(f"  show_all_objects: {show_all_objects}")
+                    print(f"  show_selected_objects: {show_selected_objects}")
+                    print(f"  selected_objects: {selected_objects}")
                     
                     # Get x_image and y_image coordinates for all objects
-                    if 'x_image' in ds.coords and 'y_image' in ds.coords:
-                        x_coords = ds.coords['x_image'].values
-                        y_coords = ds.coords['y_image'].values
+                    if 'object_x_image' in ds.data_vars and 'object_y_image' in ds.data_vars:
+                        x_coords = ds['object_x_image'].values
+                        y_coords = ds['object_y_image'].values
                         
-                        # Add markers
-                        fig = add_source_markers(
-                            fig,
-                            x_coords,
-                            y_coords,
-                            selected_indices=selected_objects,
-                            marker_size=10
-                        )
+                        print(f"[DEBUG] Object coordinates loaded:")
+                        print(f"  X shape: {x_coords.shape}, range: [{x_coords.min():.1f}, {x_coords.max():.1f}]")
+                        print(f"  Y shape: {y_coords.shape}, range: [{y_coords.min():.1f}, {y_coords.max():.1f}]")
+                        
+                        # Determine which objects to show
+                        if show_all_objects and show_selected_objects:
+                            # Show all objects, highlight selected
+                            highlighted_indices = selected_objects if selected_objects else []
+                            print(f"[DEBUG] Adding markers: ALL objects ({len(x_coords)}), highlighting {len(highlighted_indices)}")
+                            fig = add_source_markers(
+                                fig,
+                                x_coords,
+                                y_coords,
+                                selected_indices=highlighted_indices,
+                                marker_size=marker_size if marker_size else 8
+                            )
+                        elif show_all_objects:
+                            # Show all objects without highlighting
+                            print(f"[DEBUG] Adding markers: ALL objects ({len(x_coords)}), no highlighting")
+                            fig = add_source_markers(
+                                fig,
+                                x_coords,
+                                y_coords,
+                                selected_indices=[],
+                                marker_size=marker_size if marker_size else 8
+                            )
+                        elif show_selected_objects and selected_objects:
+                            # Show only selected objects
+                            selected_x = x_coords[selected_objects]
+                            selected_y = y_coords[selected_objects]
+                            print(f"[DEBUG] Adding markers: SELECTED objects only ({len(selected_objects)})")
+                            # Mark all shown as selected
+                            fig = add_source_markers(
+                                fig,
+                                selected_x,
+                                selected_y,
+                                selected_indices=list(range(len(selected_objects))),
+                                marker_size=marker_size if marker_size else 8
+                            )
+                        else:
+                            print(f"[DEBUG] No markers added (both toggles off or no selection)")
+                    else:
+                        print(f"[WARNING] Object position data not found in dataset!")
+                        print(f"  Available data_vars: {list(ds.data_vars.keys())}")
                 except Exception as e:
                     print(f"Warning: Could not add source markers: {e}")
+                    import traceback
+                    traceback.print_exc()
             
             return fig
             
         except Exception as e:
             print(f"Error loading image: {e}")
+            import traceback
+            traceback.print_exc()
             raise PreventUpdate
