@@ -77,6 +77,157 @@ def create_viz_tab():
                                 clearable=True,
                                 mt="md",
                             ),
+                            
+                            # Smoothing controls (collapsible)
+                            dmc.Accordion(
+                                [
+                                    dmc.AccordionItem(
+                                        [
+                                            dmc.AccordionControl("Smoothing & Pre-filtering Options"),
+                                            dmc.AccordionPanel([
+                                                dmc.Accordion(
+                                                    multiple=True,
+                                                    children=[
+                                                        # Pre-filtering: Fixed window sigma clip
+                                                        dmc.AccordionItem(
+                                                            [
+                                                                dmc.AccordionControl("Pre-filtering: Fixed Window Sigma Clip"),
+                                                                dmc.AccordionPanel([
+                                                                    dmc.Switch(
+                                                                        id='prefilter-window-enabled',
+                                                                        label="Enable fixed window sigma clipping",
+                                                                        checked=False,
+                                                                        mb="md",
+                                                                    ),
+                                                                    dmc.NumberInput(
+                                                                        id='smoothing-prefilter-window',
+                                                                        label="Window Size (n_samples)",
+                                                                        description="Number of samples in the window",
+                                                                        value=60,
+                                                                        min=3,
+                                                                        max=100,
+                                                                        step=1,
+                                                                        disabled=True,
+                                                                        mb="sm",
+                                                                    ),
+                                                                    dmc.NumberInput(
+                                                                        id='smoothing-prefilter-sigma',
+                                                                        label="Sigma Threshold",
+                                                                        description="Sigma clipping threshold",
+                                                                        value=5.0,
+                                                                        min=1.0,
+                                                                        max=10.0,
+                                                                        step=0.5,
+                                                                        decimalScale=1,
+                                                                        disabled=True,
+                                                                    ),
+                                                                ]),
+                                                            ],
+                                                            value="prefilter-window",
+                                                        ),
+                                                        
+                                                        # Pre-filtering: dMag/dt quantile
+                                                        dmc.AccordionItem(
+                                                            [
+                                                                dmc.AccordionControl("Pre-filtering: dMag/dt Quantile"),
+                                                                dmc.AccordionPanel([
+                                                                    dmc.Switch(
+                                                                        id='prefilter-quantile-enabled',
+                                                                        label="Enable dMag/dt quantile filtering",
+                                                                        checked=False,
+                                                                        mb="md",
+                                                                    ),
+                                                                    dmc.Stack([
+                                                                        dmc.Text("Quantile Range (%)", size="sm", mb="xs"),
+                                                                        dmc.RangeSlider(
+                                                                            id='rate-quantile-range',
+                                                                            min=0,
+                                                                            max=100,
+                                                                            step=0.5,
+                                                                            value=[2, 98],
+                                                                            minRange=1,
+                                                                            marks=[
+                                                                                {"value": 0, "label": "0"},
+                                                                                {"value": 25, "label": "25"},
+                                                                                {"value": 50, "label": "50"},
+                                                                                {"value": 75, "label": "75"},
+                                                                                {"value": 100, "label": "100"},
+                                                                            ],
+                                                                            disabled=True,
+                                                                            mb="md",
+                                                                        ),
+                                                                    ], gap="xs"),
+                                                                    dmc.Switch(
+                                                                        id='rate-quantile-symmetric',
+                                                                        label="Lock symmetric",
+                                                                        checked=True,
+                                                                        description="Lock min/max for symmetric adjustment (e.g., 2-98, 5-95)",
+                                                                        disabled=True,
+                                                                        size="sm",
+                                                                        mb="md",
+                                                                    ),
+                                                                    dmc.NumberInput(
+                                                                        id='prefilter-quantile-sigma',
+                                                                        label="Sigma Threshold",
+                                                                        description="Sigma threshold for identifying magnitude outliers",
+                                                                        value=3.0,
+                                                                        min=1.0,
+                                                                        max=10.0,
+                                                                        step=0.5,
+                                                                        decimalScale=1,
+                                                                        disabled=True,
+                                                                    ),
+                                                                ]),
+                                                            ],
+                                                            value="prefilter-quantile",
+                                                        ),
+                                                        
+                                                        # Fixed time window smoothing
+                                                        dmc.AccordionItem(
+                                                            [
+                                                                dmc.AccordionControl("Fixed Time Window Smoothing"),
+                                                                dmc.AccordionPanel([
+                                                                    dmc.Switch(
+                                                                        id='smoothing-enabled',
+                                                                        label="Enable time window smoothing",
+                                                                        checked=False,
+                                                                        mb="md",
+                                                                    ),
+                                                                    dmc.NumberInput(
+                                                                        id='smoothing-window-size',
+                                                                        label="Window Size (days)",
+                                                                        description="Time window for smoothing",
+                                                                        value=14,
+                                                                        min=1,
+                                                                        max=365,
+                                                                        step=1,
+                                                                        disabled=True,
+                                                                        mb="sm",
+                                                                    ),
+                                                                    dmc.NumberInput(
+                                                                        id='smoothing-sigma',
+                                                                        label="Sigma Threshold",
+                                                                        description="Sigma clipping threshold for outlier rejection",
+                                                                        value=3.0,
+                                                                        min=1.0,
+                                                                        max=10.0,
+                                                                        step=0.5,
+                                                                        decimalScale=1,
+                                                                        disabled=True,
+                                                                    ),
+                                                                ]),
+                                                            ],
+                                                            value="smoothing",
+                                                        ),
+                                                    ],
+                                                ),
+                                            ]),
+                                        ],
+                                        value="smoothing",
+                                    ),
+                                ],
+                                mt="md",
+                            ),
                         ],
                         p="md",
                         mb="md",

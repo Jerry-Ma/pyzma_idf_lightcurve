@@ -11,12 +11,35 @@ import logging
 import time
 import random
 from functools import lru_cache
+from astropy.stats import SigmaClip
+from typing import NamedTuple, Optional
 
 from ...datamodel import LightcurveStorage
 from ..app import get_storage_cache
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Data Structures
+# =============================================================================
+
+class SmoothingResult(NamedTuple):
+    """Result from apply_sigma_clipped_smoothing function.
+    
+    All arrays are in time-sorted order for consistency.
+    """
+    x_smoothed: np.ndarray  # Smoothed x values (empty if smoothing disabled)
+    y_smoothed: np.ndarray  # Smoothed y values (empty if smoothing disabled)
+    y_err_smoothed: np.ndarray  # Smoothed y errors (empty if smoothing disabled)
+    rejected_mask: Optional[np.ndarray]  # Boolean mask of rejected points (sorted order, None if no filtering)
+    rates: Optional[np.ndarray]  # Rate of change (dmag/dt) between consecutive points (sorted order)
+    mag_first_point: Optional[np.ndarray]  # Magnitude of first point in each consecutive pair (sorted order)
+    x_sorted: np.ndarray  # Original x data in sorted order
+    y_sorted: np.ndarray  # Original y data in sorted order
+    y_err_sorted: np.ndarray  # Original y errors in sorted order
+
 
 # =============================================================================
 # Magnitude Conversion Utilities
@@ -209,6 +232,268 @@ def prepare_magnitude_data(
     return y_values, y_errors
 
 
+def apply_sigma_clipped_smoothing(x_data, y_data, y_error, 
+                                  prefilter_window_enabled=False,
+                                  prefilter_window_samples=None, prefilter_window_sigma=None,
+                                  prefilter_quantile_enabled=False,
+                                  rate_quantile_range=None, prefilter_quantile_sigma=None,
+                                  smoothing_enabled=False,
+                                  window_size_days=None, smoothing_sigma=None):
+    """Apply multi-stage filtering and smoothing to lightcurve data.
+    
+    This function can apply up to three stages (all optional and independent):
+    1. Pre-filtering: Fixed window sigma clip (if enabled)
+    2. Pre-filtering: dMag/dt quantile clipping (if enabled)
+    3. Smoothing: Time-window sigma clipping for local averaging (if enabled)
+    
+    Args:
+        x_data: Time values (e.g., MJD) - must be in days or convertible to float
+        y_data: Magnitude values
+        y_error: Magnitude errors
+        prefilter_window_enabled: Whether to apply fixed window sigma clip pre-filtering
+        prefilter_window_samples: Number of samples in window for pre-filtering
+        prefilter_window_sigma: Sigma threshold for window pre-filtering
+        prefilter_quantile_enabled: Whether to apply dMag/dt quantile pre-filtering
+        rate_quantile_range: [q_low, q_high] percentiles for rate clipping (e.g., [2, 98])
+        prefilter_quantile_sigma: Sigma threshold for magnitude outlier identification in rate filtering
+        smoothing_enabled: Whether to apply time window smoothing
+        window_size_days: Size of time window in days for smoothing
+        smoothing_sigma: Sigma threshold for clipping in smoothing stage
+        
+    Returns:
+        SmoothingResult: Named tuple containing all results in sorted order.
+                        Returns empty arrays and Nones if processing fails.
+    """
+    if len(x_data) < 3:
+        logger.warning("Not enough points for smoothing (need at least 3)")
+        return SmoothingResult(
+            x_smoothed=np.array([]),
+            y_smoothed=np.array([]),
+            y_err_smoothed=np.array([]),
+            rejected_mask=None,
+            rates=None,
+            mag_first_point=None,
+            x_sorted=np.array([]),
+            y_sorted=np.array([]),
+            y_err_sorted=np.array([])
+        )
+    
+    # Store original dtype for conversion back
+    original_dtype = x_data.dtype
+    is_timedelta = hasattr(x_data, 'dtype') and np.issubdtype(x_data.dtype, np.timedelta64)
+    is_datetime = hasattr(x_data, 'dtype') and np.issubdtype(x_data.dtype, np.datetime64)
+    
+    # Convert x_data to float if it's a timedelta or datetime type
+    if is_timedelta:
+        x_data_float = x_data / np.timedelta64(1, 'D')
+    elif is_datetime:
+        x_data_float = x_data.astype('datetime64[D]').astype(float)
+    else:
+        x_data_float = np.asarray(x_data, dtype=float)
+    
+    # Sort data by time
+    sort_idx = np.argsort(x_data_float)
+    x_sorted = x_data_float[sort_idx]
+    y_sorted = y_data[sort_idx]
+    y_err_sorted = y_error[sort_idx]
+    
+    # Convert x_sorted back to original dtype immediately after sorting
+    # This ensures all returns have consistent dtype
+    if is_timedelta:
+        x_sorted_original = (x_sorted * np.timedelta64(1, 'D')).astype(original_dtype)
+    elif is_datetime:
+        x_sorted_original = x_sorted.astype('datetime64[D]').astype(original_dtype)
+    else:
+        x_sorted_original = x_sorted
+    
+    # Calculate rates for all consecutive points on SORTED data (for later use in plotting)
+    dmag_sorted = np.diff(y_sorted)
+    dt_sorted = np.diff(x_sorted)
+    valid_dt_sorted = dt_sorted != 0
+    rates_sorted = np.full_like(dmag_sorted, np.nan)
+    if np.any(valid_dt_sorted):
+        rates_sorted[valid_dt_sorted] = dmag_sorted[valid_dt_sorted] / dt_sorted[valid_dt_sorted]
+    mag_first_point_sorted = y_sorted[:-1]  # Magnitude of first point in each pair
+    
+    # Stage 1: Pre-filtering (can apply both methods independently)
+    mask = np.ones(len(x_sorted), dtype=bool)
+    rejected_mask_sorted = np.zeros(len(x_sorted), dtype=bool)
+    
+    # Pre-filtering 1: Fixed window sigma clip
+    if prefilter_window_enabled and prefilter_window_samples is not None and prefilter_window_sigma is not None:
+        logger.info(f"Pre-filtering (fixed window): n_samples={prefilter_window_samples}, sigma={prefilter_window_sigma}")
+        half_window = prefilter_window_samples // 2
+        
+        # Create SigmaClip object for window filtering
+        sigclip_window = SigmaClip(sigma=prefilter_window_sigma, maxiters=2)
+        
+        for i in range(len(x_sorted)):
+            # Find surrounding points by index (fixed number of samples)
+            start_idx = max(0, i - half_window)
+            end_idx = min(len(x_sorted), i + half_window + 1)
+            
+            if end_idx - start_idx < 3:
+                continue
+            
+            window_y = y_sorted[start_idx:end_idx]
+            
+            try:
+                clipped = sigclip_window(window_y, masked=True)
+                # Mark ALL points in the window that are clipped as rejected
+                for j, is_clipped in enumerate(clipped.mask):
+                    if is_clipped:
+                        global_idx = start_idx + j
+                        mask[global_idx] = False
+                        rejected_mask_sorted[global_idx] = True
+            except Exception as e:
+                logger.warning(f"Window pre-filter failed at index {i}: {e}")
+                continue
+        
+        n_rejected = np.sum(rejected_mask_sorted)
+        logger.info(f"Window pre-filtering removed {n_rejected} outliers ({n_rejected/len(mask)*100:.1f}%)")
+    
+    # Pre-filtering 2: Rate-based filtering with magnitude outlier identification
+    if prefilter_quantile_enabled and rate_quantile_range is not None and len(rate_quantile_range) == 2 and prefilter_quantile_sigma is not None:
+        # Quantile-based pre-filtering: rate clipping
+        q_low, q_high = rate_quantile_range
+        logger.info(f"Pre-filtering (rate-based): rate quantiles [{q_low}, {q_high}]%, sigma={prefilter_quantile_sigma}")
+        
+        # Use the already calculated rates from sorted data
+        # Avoid division by zero - only use valid rates
+        if np.any(valid_dt_sorted):
+            # Compute quantile thresholds on valid rates only
+            rate_low = np.percentile(rates_sorted[valid_dt_sorted], q_low)
+            rate_high = np.percentile(rates_sorted[valid_dt_sorted], q_high)
+            
+            # Create separate SigmaClip object for rate filtering
+            sigclip_rate = SigmaClip(sigma=prefilter_quantile_sigma, maxiters=2)
+            
+            # Calculate sigma-clipped median of all magnitudes to identify outliers
+            clipped_mags = sigclip_rate(y_sorted[mask], masked=True)
+            median_mag = np.ma.median(clipped_mags)
+
+            logger.info(f"Rate thresholds: [{rate_low:.4f}, {rate_high:.4f}] mag/day median_mag={median_mag}")
+            
+            # For each extreme rate, reject only the point that is farther from median
+            for i in range(len(rates_sorted)):
+                if valid_dt_sorted[i]:
+                    if rates_sorted[i] < rate_low or rates_sorted[i] > rate_high:
+                        # This rate connects point i to point i+1
+                        # Reject the one farther from the sigma-clipped median
+                        dist_i = np.abs(y_sorted[i] - median_mag)
+                        dist_i_plus_1 = np.abs(y_sorted[i + 1] - median_mag)
+                        
+                        if dist_i > dist_i_plus_1:
+                            rejected_mask_sorted[i] = True
+                            mask[i] = False
+                        else:
+                            rejected_mask_sorted[i + 1] = True
+                            mask[i + 1] = False
+            
+            n_rejected = np.sum(rejected_mask_sorted)
+            logger.info(f"Rate-based pre-filtering rejected {n_rejected} points ({n_rejected/len(mask)*100:.1f}%)")
+        else:
+            logger.warning("No valid time intervals for rate calculation")
+    
+    # Apply mask to data
+    x_masked = x_sorted[mask]
+    y_masked = y_sorted[mask]
+    y_err_masked = y_err_sorted[mask]
+    
+    if len(x_masked) < 3:
+        logger.warning("Too few points remaining after pre-filtering")
+        # Return rejection mask in sorted order (all data is sorted)
+        has_prefilter = prefilter_window_enabled or prefilter_quantile_enabled
+        return SmoothingResult(
+            x_smoothed=np.array([]),
+            y_smoothed=np.array([]),
+            y_err_smoothed=np.array([]),
+            rejected_mask=rejected_mask_sorted if has_prefilter else None,
+            rates=rates_sorted,
+            mag_first_point=mag_first_point_sorted,
+            x_sorted=x_sorted_original,
+            y_sorted=y_sorted,
+            y_err_sorted=y_err_sorted
+        )
+    
+    # Stage 3: Time window smoothing (optional)
+    if not smoothing_enabled or window_size_days is None or smoothing_sigma is None:
+        # No smoothing requested, return original data (after pre-filtering)
+        has_prefilter = prefilter_window_enabled or prefilter_quantile_enabled
+        return SmoothingResult(
+            x_smoothed=x_masked,
+            y_smoothed=y_masked,
+            y_err_smoothed=y_err_masked,
+            rejected_mask=rejected_mask_sorted if has_prefilter else None,
+            rates=rates_sorted,
+            mag_first_point=mag_first_point_sorted,
+            x_sorted=x_sorted_original,
+            y_sorted=y_sorted,
+            y_err_sorted=y_err_sorted
+        )
+    
+    x_smoothed = []
+    y_smoothed = []
+    y_err_smoothed = []
+    
+    half_window = window_size_days / 2.0
+    
+    # Create SigmaClip object for smoothing stage
+    sigclip = SigmaClip(sigma=smoothing_sigma, maxiters=2)
+    
+    for i, t in enumerate(x_masked):
+        # Find points within time window
+        window_mask = np.abs(x_masked - t) <= half_window
+        
+        if np.sum(window_mask) < 2:
+            continue
+        
+        window_y = y_masked[window_mask]
+        window_err = y_err_masked[window_mask]
+        
+        # Apply sigma clipping
+        try:
+            clipped = sigclip(window_y, masked=True)
+            
+            if np.sum(~clipped.mask) == 0:
+                continue
+            
+            # Calculate median and standard deviation from non-clipped points
+            y_median = np.ma.median(clipped)
+            y_std = np.ma.std(clipped)
+            
+            x_smoothed.append(t)
+            y_smoothed.append(y_median)
+            y_err_smoothed.append(y_std)
+            
+        except Exception as e:
+            logger.warning(f"Sigma clipping failed at t={t}: {e}")
+            continue
+    
+    x_smoothed = np.array(x_smoothed)
+    
+    # Convert x_smoothed and x_sorted back to original dtype
+    if is_timedelta:
+        x_smoothed = (x_smoothed * np.timedelta64(1, 'D')).astype(original_dtype)
+    elif is_datetime:
+        x_smoothed = x_smoothed.astype('datetime64[D]').astype(original_dtype)
+    
+    # Return rejection mask in sorted order (all data is sorted)
+    has_prefilter = prefilter_window_enabled or prefilter_quantile_enabled
+    
+    return SmoothingResult(
+        x_smoothed=x_smoothed,
+        y_smoothed=np.array(y_smoothed),
+        y_err_smoothed=np.array(y_err_smoothed),
+        rejected_mask=rejected_mask_sorted if has_prefilter else None,
+        rates=rates_sorted,
+        mag_first_point=mag_first_point_sorted,
+        x_sorted=x_sorted_original,
+        y_sorted=y_sorted,
+        y_err_sorted=y_err_sorted
+    )
+
+
 def _register_object_table_callback(app, cache):
     """Register callback to populate and update the object table."""
     
@@ -245,20 +530,14 @@ def _register_object_table_callback(app, cache):
         
         object_df = cache.get(f"object_df:{path_mode}")
         if object_df is None:
-            return [], [], [], current_history or []
+            return [], [], current_history or []
         
         # Filter objects by query
         try:
             filtered_df = object_df.query(object_query.strip())
         except Exception as e:
             logger.error(f"Query filter failed: {e}")
-            return [], [], [], current_history or []
-        
-        # Check if result is too large
-        MAX_OBJECTS = 1000
-        if len(filtered_df) > MAX_OBJECTS:
-            logger.warning(f"Query returned {len(filtered_df)} objects (limit: {MAX_OBJECTS})")
-            return [], [], [], current_history or []
+            return [], [], current_history or []
         
         # Warn if no results
         if len(filtered_df) == 0:
@@ -306,6 +585,8 @@ def _register_object_table_callback(app, cache):
             # Column names typically don't have operators like >, <, =, in, etc.
             queries_only = [q for q in history_list if any(op in q for op in ['>', '<', '=', 'in', '!=', '>=', '<='])]
             history_list = queries_only[:20]
+        
+        logger.info(f"Query returned {len(filtered_df)} objects")
         
         return row_data, object_list, history_list
 
@@ -386,28 +667,37 @@ def _register_navigation_callbacks(app, cache):
         
         trigger_id = ctx.triggered[0]['prop_id'].split('.')[0]
         
+        # Get current selection range
+        if selected_rows:
+            selected_indices = [row['#'] for row in selected_rows]
+            first_selected = min(selected_indices)
+            last_selected = max(selected_indices)
+        else:
+            first_selected = current_index if current_index is not None else 0
+            last_selected = first_selected
+        
         # Handle navigation buttons (select next N objects)
         if trigger_id.startswith('nav-prev'):
-            # Previous N buttons - select N objects before current
+            # Previous N buttons - select N objects ending at first_selected - 1
             if trigger_id == 'nav-prev5-button':
                 n = 5
             elif trigger_id == 'nav-prev2-button':
                 n = 2
             else:  # nav-prev1-button
                 n = 1
-            start_index = max(0, current_index - n)
-            end_index = current_index
+            end_index = first_selected
+            start_index = max(0, end_index - n)
             new_index = start_index
         elif trigger_id.startswith('nav-next'):
-            # Next N buttons - select next N objects from current
+            # Next N buttons - select N objects starting from last_selected + 1
             if trigger_id == 'nav-next5-button':
                 n = 5
             elif trigger_id == 'nav-next2-button':
                 n = 2
             else:  # nav-next1-button
                 n = 1
-            start_index = current_index
-            end_index = min(len(object_list), current_index + n)
+            start_index = last_selected + 1
+            end_index = min(len(object_list), start_index + n)
             new_index = start_index
         elif trigger_id == 'object-table' and selected_rows:
             # Handle AG Grid row selection
@@ -423,6 +713,23 @@ def _register_navigation_callbacks(app, cache):
         return new_index, new_selected
 
 
+def _register_smoothing_control_callback(app):
+    """Register callback to enable/disable smoothing parameter inputs."""
+    
+    @app.callback(
+        [
+            Output('smoothing-prefilter-window', 'disabled'),
+            Output('smoothing-prefilter-sigma', 'disabled'),
+            Output('smoothing-window-size', 'disabled'),
+            Output('smoothing-sigma', 'disabled'),
+        ],
+        Input('smoothing-enabled', 'checked'),
+    )
+    def toggle_smoothing_controls(enabled):
+        """Enable or disable smoothing parameter inputs based on switch state."""
+        return not enabled, not enabled, not enabled, not enabled
+
+
 def register_viz_callbacks(app):
     """Register all visualization-related callbacks."""
     cache = get_storage_cache()
@@ -436,6 +743,7 @@ def register_viz_callbacks(app):
     _register_object_table_callback(app, cache)
     _register_selection_feedback_callback(app)
     _register_navigation_callbacks(app, cache)
+    _register_smoothing_control_callback(app)
     _register_plot_generation_callback(app, cache)
 
 
@@ -631,6 +939,91 @@ def _register_query_autocomplete_callback(app, cache):
         return combined
 
 
+def _register_smoothing_control_callback(app):
+    """Register callbacks to enable/disable controls for each smoothing/filtering method."""
+    
+    # Pre-filtering: Fixed window sigma clip controls
+    @app.callback(
+        [
+            Output('smoothing-prefilter-window', 'disabled'),
+            Output('smoothing-prefilter-sigma', 'disabled'),
+        ],
+        Input('prefilter-window-enabled', 'checked'),
+    )
+    def toggle_window_prefilter_controls(enabled):
+        """Enable/disable window pre-filter controls."""
+        disabled = not enabled
+        return disabled, disabled
+    
+    # Pre-filtering: dMag/dt quantile controls
+    @app.callback(
+        [
+            Output('rate-quantile-range', 'disabled'),
+            Output('rate-quantile-symmetric', 'disabled'),
+            Output('prefilter-quantile-sigma', 'disabled'),
+        ],
+        Input('prefilter-quantile-enabled', 'checked'),
+    )
+    def toggle_quantile_prefilter_controls(enabled):
+        """Enable/disable quantile pre-filter controls."""
+        disabled = not enabled
+        return disabled, disabled, disabled
+    
+    # Fixed time window smoothing controls
+    @app.callback(
+        [
+            Output('smoothing-window-size', 'disabled'),
+            Output('smoothing-sigma', 'disabled'),
+        ],
+        Input('smoothing-enabled', 'checked'),
+    )
+    def toggle_smoothing_controls(enabled):
+        """Enable/disable smoothing controls."""
+        disabled = not enabled
+        return disabled, disabled
+
+
+def _register_symmetric_quantile_callback(app):
+    """Register callback to enforce symmetric quantiles when switch is enabled."""
+    
+    @app.callback(
+        Output('rate-quantile-range', 'value'),
+        Input('rate-quantile-range', 'value'),
+        State('rate-quantile-symmetric', 'checked'),
+        prevent_initial_call=True,
+    )
+    def enforce_symmetric_quantiles(value, symmetric):
+        """Enforce symmetric quantiles when switch is enabled.
+        
+        Ensures q_low + q_high = 100 for balanced outlier removal.
+        Example: [2, 98], [5, 95], [10, 90]
+        """
+        if not symmetric or value is None or len(value) != 2:
+            return no_update
+        
+        q_low, q_high = value
+        
+        # Check if already symmetric (within tolerance)
+        if abs((q_low + q_high) - 100) < 0.1:
+            return no_update
+        
+        # Determine which endpoint changed by checking which is closer to 50
+        # Adjust the other endpoint to maintain symmetry
+        if abs(q_low - 50) < abs(q_high - 50):
+            # q_low changed less, adjust q_high to match
+            new_high = 100 - q_low
+        else:
+            # q_high changed less, adjust q_low to match
+            new_low = 100 - q_high
+            return [new_low, q_high]
+        
+        # Ensure within bounds [0, 100]
+        new_high = max(0, min(100, new_high))
+        new_low = 100 - new_high
+        
+        return [new_low, new_high]
+
+
 def _register_viz_controls_callback(app):
     """Register callback for updating visualization controls."""
     
@@ -736,6 +1129,15 @@ def _register_plot_generation_callback(app, cache):
             Input('object-table', 'selectedRows'),
             Input('measurement-keys-select', 'value'),
             Input('x-axis-select', 'value'),
+            Input('prefilter-window-enabled', 'checked'),
+            Input('smoothing-prefilter-window', 'value'),
+            Input('smoothing-prefilter-sigma', 'value'),
+            Input('prefilter-quantile-enabled', 'checked'),
+            Input('rate-quantile-range', 'value'),
+            Input('prefilter-quantile-sigma', 'value'),
+            Input('smoothing-enabled', 'checked'),
+            Input('smoothing-window-size', 'value'),
+            Input('smoothing-sigma', 'value'),
         ],
         [
             State('storage-data', 'data'),
@@ -748,6 +1150,15 @@ def _register_plot_generation_callback(app, cache):
         selected_rows,
         measurement_keys,
         x_axis_key,
+        prefilter_window_enabled,
+        smoothing_prefilter_window,
+        smoothing_prefilter_sigma,
+        prefilter_quantile_enabled,
+        rate_quantile_range,
+        prefilter_quantile_sigma,
+        smoothing_enabled,
+        smoothing_window_days,
+        smoothing_sigma,
         storage_data,
         object_list,
     ):
@@ -756,10 +1167,19 @@ def _register_plot_generation_callback(app, cache):
         Args:
             plot_index: Current object index (fallback if no selection)
             selected_rows: List of selected rows from AG Grid
-            storage_data: Storage metadata dict with path and mode
-            object_list: Filtered list of object IDs
             measurement_keys: List of measurement columns to plot
             x_axis_key: Column to use for x-axis
+            prefilter_window_enabled: Whether to apply fixed window sigma clip pre-filtering
+            smoothing_prefilter_window: Pre-filter window size (n_samples)
+            smoothing_prefilter_sigma: Pre-filter sigma threshold for window filtering
+            prefilter_quantile_enabled: Whether to apply dMag/dt quantile pre-filtering
+            rate_quantile_range: [q_low, q_high] percentiles for rate clipping
+            prefilter_quantile_sigma: Sigma threshold for magnitude outlier identification in rate filtering
+            smoothing_enabled: Whether to apply time window smoothing
+            smoothing_window_days: Window size in days for smoothing
+            smoothing_sigma: Sigma threshold for outlier rejection in smoothing
+            storage_data: Storage metadata dict with path and mode
+            object_list: Filtered list of object IDs
             
         Returns:
             tuple: (plotly figure, style dict for container)
@@ -845,15 +1265,24 @@ def _register_plot_generation_callback(app, cache):
                 for meas in measurement_keys:
                     subplot_titles.append(f"Object {obj} - {meas}")
         
-        logger.info(f"🎨 Creating {n_rows} subplots for {n_objects} objects with {len(measurement_keys)} measurements...")
+        logger.info(f"🎨 Creating {n_rows} subplots (2 columns: lightcurve + rate diagnostic) for {n_objects} objects with {len(measurement_keys)} measurements...")
         
-        # Create subplot figure
+        # Create subplot figure with 2 columns: lightcurve on left, rate diagnostic on right
+        # Share y-axis between columns since both plot magnitude
+        subplot_titles_2col = []
+        for title in subplot_titles:
+            subplot_titles_2col.append(title)
+            subplot_titles_2col.append(f"{title} (Rate Diagnostic)")
+        
         fig = make_subplots(
             rows=n_rows,
-            cols=n_cols,
-            subplot_titles=subplot_titles,
+            cols=2,
+            subplot_titles=subplot_titles_2col,
             vertical_spacing=0.05 if n_rows > 1 else 0.08,
-            specs=[[{"secondary_y": False}] for _ in range(n_rows)]
+            horizontal_spacing=0.08,
+            specs=[[{"secondary_y": False}, {"secondary_y": False}] for _ in range(n_rows)],
+            column_widths=[0.6, 0.4],
+            shared_yaxes=True
         )
         
         # Store reference magnitudes for legends
@@ -938,13 +1367,39 @@ def _register_plot_generation_callback(app, cache):
                     color_palette = ['blue', 'red', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'cyan', 'magenta']
                     marker_color = color_palette[meas_idx % len(color_palette)]
                     
+                    # Always process data through apply_sigma_clipped_smoothing to get consistent sorted data
+                    # This ensures x_data_sorted, y_data_sorted, rates, and rejected_mask are all aligned
+                    logger.info(f"Processing data for consistent sorting:")
+                    if prefilter_window_enabled or prefilter_quantile_enabled or smoothing_enabled:
+                        logger.info(f"  Pre-filter/smoothing enabled:")
+                        if prefilter_window_enabled:
+                            logger.info(f"    Pre-filter (fixed window): n_samples={smoothing_prefilter_window}, sigma={smoothing_prefilter_sigma}")
+                        if prefilter_quantile_enabled:
+                            logger.info(f"    Pre-filter (quantile): rate quantiles {rate_quantile_range}%")
+                        if smoothing_enabled:
+                            logger.info(f"    Smoothing: window={smoothing_window_days} days, sigma={smoothing_sigma}")
+                    
+                    result = apply_sigma_clipped_smoothing(
+                        x_data, y_data, y_error,
+                        prefilter_window_enabled=prefilter_window_enabled,
+                        prefilter_window_samples=smoothing_prefilter_window,
+                        prefilter_window_sigma=smoothing_prefilter_sigma,
+                        prefilter_quantile_enabled=prefilter_quantile_enabled,
+                        rate_quantile_range=rate_quantile_range,
+                        prefilter_quantile_sigma=prefilter_quantile_sigma,
+                        smoothing_enabled=smoothing_enabled,
+                        window_size_days=smoothing_window_days,
+                        smoothing_sigma=smoothing_sigma
+                    )
+                    
+                    # Plot raw data (sorted - returned from apply_sigma_clipped_smoothing)
                     fig.add_trace(
                         go.Scattergl(
-                            x=x_data,
-                            y=y_data,
+                            x=result.x_sorted,
+                            y=result.y_sorted,
                             error_y=dict(
                                 type='data',
-                                array=y_error,
+                                array=result.y_err_sorted,
                                 visible=True,
                                 color=error_color,
                                 thickness=1,
@@ -963,6 +1418,149 @@ def _register_plot_generation_callback(app, cache):
                         col=1
                     )
                     traces_added += 1
+                    
+                    # Add rate diagnostic plot using precomputed rates (sorted and aligned)
+                    if result.rates is not None and result.mag_first_point is not None and len(result.rates) > 0:
+                        # Filter out NaN rates
+                        valid_rates = ~np.isnan(result.rates)
+                        if np.any(valid_rates):
+                            # Plot rate diagnostic
+                            fig.add_trace(
+                                go.Scattergl(
+                                    x=result.rates[valid_rates],
+                                    y=result.mag_first_point[valid_rates],
+                                    mode='markers',
+                                    name=f"{trace_name} (rate)",
+                                    showlegend=False,
+                                    marker=dict(
+                                        size=4,
+                                        color=marker_color,
+                                        line=dict(width=0.5, color='white'),
+                                    ),
+                                ),
+                                row=subplot_row,
+                                col=2
+                            )
+                            
+                            # Add vertical line at rate=0
+                            fig.add_shape(
+                                type="line",
+                                x0=0, x1=0,
+                                y0=np.min(result.mag_first_point[valid_rates]), y1=np.max(result.mag_first_point[valid_rates]),
+                                line=dict(color="gray", width=1, dash="dash"),
+                                row=subplot_row,
+                                col=2
+                            )
+                    
+                    # Plot rejected points if any
+                    if result.rejected_mask is not None and np.any(result.rejected_mask):
+                        # Plot rejected points with cross symbols in lightcurve (use sorted data)
+                        x_rejected = result.x_sorted[result.rejected_mask]
+                        y_rejected = result.y_sorted[result.rejected_mask]
+                        y_err_rejected = result.y_err_sorted[result.rejected_mask]
+                        
+                        fig.add_trace(
+                            go.Scattergl(
+                                x=x_rejected,
+                                y=y_rejected,
+                                error_y=dict(
+                                    type='data',
+                                    array=y_err_rejected,
+                                    visible=True,
+                                    color='rgba(255, 0, 0, 0.3)',
+                                    thickness=1,
+                                    width=0,
+                                ),
+                                mode='markers',
+                                name=f"{trace_name} (rejected)",
+                                showlegend=True,
+                                marker=dict(
+                                    size=8,
+                                    color='red',
+                                    symbol='x',
+                                    line=dict(width=2),
+                                ),
+                            ),
+                            row=subplot_row,
+                            col=1
+                        )
+                        traces_added += 1
+                        
+                        # Also plot rejected points in rate diagnostic
+                        # rejected_mask indices directly correspond to sorted data indices
+                        if result.rates is not None and result.mag_first_point is not None:
+                            # Rates are calculated between consecutive points, so mask needs to be trimmed
+                            rejected_mask_rates = result.rejected_mask[:-1]
+                            
+                            # Apply mask to get rejected rates
+                            rate_rej = result.rates[rejected_mask_rates]
+                            mag_rej = result.mag_first_point[rejected_mask_rates]
+                            
+                            # Filter out NaN rates
+                            valid_rej = ~np.isnan(rate_rej)
+                            rate_rej_list = rate_rej[valid_rej].tolist()
+                            mag_rej_list = mag_rej[valid_rej].tolist()
+                            
+                            if len(rate_rej_list) > 0:
+                                fig.add_trace(
+                                    go.Scattergl(
+                                        x=rate_rej_list,
+                                        y=mag_rej_list,
+                                        mode='markers',
+                                        name=f"{trace_name} (rejected rate)",
+                                        showlegend=False,
+                                        marker=dict(
+                                            size=6,
+                                            color='red',
+                                            symbol='x',
+                                            line=dict(width=1.5),
+                                        ),
+                                    ),
+                                    row=subplot_row,
+                                    col=2
+                                )
+                    
+                    if smoothing_enabled and len(result.x_smoothed) > 0:
+                        # Plot smoothed data as a line on top
+                        logger.info(f"Adding smoothed trace: {len(result.x_smoothed)} points")
+                        logger.info(f"  X range: [{result.x_smoothed.min()}, {result.x_smoothed.max()}]")
+                        logger.info(f"  Y range: [{result.y_smoothed.min()}, {result.y_smoothed.max()}]")
+                        logger.info(f"  Raw X range: [{result.x_sorted.min()}, {result.x_sorted.max()}]")
+                        logger.info(f"  Raw Y range: [{result.y_sorted.min()}, {result.y_sorted.max()}]")
+                        fig.add_trace(
+                            go.Scattergl(
+                                x=result.x_smoothed,
+                                y=result.y_smoothed,
+                                error_y=dict(
+                                    type='data',
+                                    array=result.y_err_smoothed,
+                                    visible=True,
+                                    color='rgba(255, 0, 255, 0.5)',  # Bright magenta, semi-transparent
+                                    thickness=2,
+                                    width=3,
+                                ),
+                                mode='lines+markers',
+                                name=f"{trace_name} (smoothed)",
+                                showlegend=True,
+                                line=dict(
+                                    color='magenta',  # Bright magenta line
+                                    width=3,
+                                ),
+                                marker=dict(
+                                    size=8,  # Larger markers
+                                    color='magenta',  # Bright magenta
+                                    symbol='diamond',
+                                    line=dict(width=1, color='white'),
+                                ),
+                            ),
+                            row=subplot_row,
+                            col=1
+                        )
+                        logger.info(f"Added smoothed trace with {len(result.x_smoothed)} points")
+                    elif smoothing_enabled:
+                        logger.warning(f"Smoothing enabled but returned no points for {obj_key}/{meas_key} (input had {len(result.x_sorted)} points)")
+                    else:
+                        logger.info(f"Smoothing not enabled for {obj_key}/{meas_key}")
                     
                 except Exception as e:
                     traces_failed += 1
@@ -997,14 +1595,36 @@ def _register_plot_generation_callback(app, cache):
         )
         
         # Invert y-axis for all subplots (magnitude convention)
+        # Only set y-axis properties on left column since they're shared
         for row_idx in range(1, n_rows + 1):
+            # Left column: lightcurve (y-axis properties apply to both columns)
             fig.update_yaxes(autorange='reversed', title_text="Magnitude", row=row_idx, col=1)
-        
-        # Update x-axis labels
-        fig.update_xaxes(title_text=x_axis_key or "Epoch", row=n_rows, col=1)
+            fig.update_xaxes(title_text=x_axis_key or "Epoch", row=row_idx, col=1)
+            
+            # Right column: rate diagnostic (only update x-axis, y-axis is shared)
+            fig.update_xaxes(title_text="dMag/dt (mag/day)", row=row_idx, col=2)
         
         logger.info(f"✅ PLOT GENERATION COMPLETE ({time.time() - start_time:.2f}s)")
         logger.info("="*80)
         
         # Return flexible height style (doubled minimum)
         return fig, {"height": f"{plot_height}px", "minHeight": "800px"}
+
+
+def register_viz_callbacks(app):
+    """Register all visualization tab callbacks.
+    
+    Args:
+        app: Dash application instance
+    """
+    cache = get_storage_cache()
+    
+    # Register all callbacks
+    _register_object_table_callback(app, cache)
+    _register_selection_feedback_callback(app)
+    _register_navigation_callbacks(app, cache)
+    _register_query_autocomplete_callback(app, cache)
+    _register_smoothing_control_callback(app)
+    _register_symmetric_quantile_callback(app)
+    _register_viz_controls_callback(app)
+    _register_plot_generation_callback(app, cache)
